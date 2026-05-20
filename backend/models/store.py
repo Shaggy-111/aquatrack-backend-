@@ -1,0 +1,101 @@
+# --- Imports ---
+from sqlalchemy import (
+    Column,
+    Integer,
+    String,
+    DateTime,
+    Float,
+    ForeignKey
+)
+from sqlalchemy.orm import relationship
+from datetime import datetime
+from sqlalchemy import Date
+
+from ..database.db import Base
+from .partner_store import PartnerStore
+from sqlalchemy import Boolean
+
+
+class Store(Base):
+    __tablename__ = "stores"
+
+    # -------------------------------------------------
+    # Core Columns
+    # -------------------------------------------------
+    id = Column(String, primary_key=True, index=True)
+
+    store_name = Column(String(255), nullable=False)
+    address = Column(String(255), nullable=True)
+    city = Column(String(100), nullable=True)
+    state = Column(String(100), nullable=True)
+    zip_code = Column(String(20), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    pending_empty_bottles = Column(Integer, default=0, nullable=False)
+
+    # -------------------------------------------------
+    # Location & Channel
+    # -------------------------------------------------
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+    channel = Column(String(30), nullable=False, default="GENERAL")
+    per_day_consumption = Column(Integer, default=0)
+    monthly_cap = Column(Integer, default=0)
+    last_order_date = Column(Date, nullable=True)
+    auto_order_enabled = Column(Boolean, default=False)
+    order_frequency_days = Column(Integer, default=1)
+
+    # -------------------------------------------------
+    # ⭐ DELIVERY MANAGER OWNERSHIP (CRITICAL)
+    # -------------------------------------------------
+    assigned_manager_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=True,
+        index=True
+    )
+
+    assigned_manager = relationship(
+        "User",
+        backref="managed_stores",
+        foreign_keys=[assigned_manager_id]
+    )
+
+    # -------------------------------------------------
+    # Relationships
+    # -------------------------------------------------
+    partners = relationship(
+        "User",
+        secondary="partner_stores",
+        back_populates="stores"
+    )
+
+    partner_associations = relationship(
+        "PartnerStore",
+        back_populates="store",
+        cascade="all, delete-orphan"
+    )
+
+    orders = relationship(
+        "Order",
+        back_populates="store",
+        cascade="all, delete-orphan"
+    )
+
+    bottles_at_store = relationship(
+        "Bottle",
+        back_populates="store",
+        cascade="all, delete-orphan"
+    )
+
+    # -------------------------------------------------
+    # String Representation
+    # -------------------------------------------------
+    def __repr__(self):
+        return (
+            f"<Store("
+            f"id={self.id}, "
+            f"name='{self.store_name}', "
+            f"city='{self.city}', "
+            f"assigned_manager_id={self.assigned_manager_id}"
+            f")>"
+        )

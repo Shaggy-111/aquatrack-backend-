@@ -1,0 +1,13 @@
+{
+  "type": "service_account",
+  "project_id": "water-management-464106",
+  "private_key_id": "c970ca78c97a4641c9172201b16bdba154b207b9",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCuY4Ire8veBF18\nRcX/9S+Ia1mHsd0uxrs/JflpeQ+amvmRR/ALApj1eREkEr/JWBpzREGnpCF7QMpo\nv5qmdSUcf5cV1df0AQVcVPS35jAKXRD6Ltez7Q/U6qNoKuKGYadGHsSggnLz345N\nt0HSfH41ZrjcvorjGBzTrZSRMPceaMQWrmsvNonm6sV8w42CiG2MP/ELJuqzJY5v\n+uRkfF81WhcD6hHYn0J42LMMeHSiSzD3H2qTkTnW64YFUlX6GA3KQSolmVP3MoEc\n/sQO5EI85AeVZdxnGvjkzpo0AVTME/+7V9s2GI7WB+3RaKF/IjX0ojYuUQ4wwlbB\ngp32LexrAgMBAAECggEABrIiszFzfKc0EqAD8YF1piF5EXnXNb1Om/hKwSH/Be3E\nrS9eqCTXNNt/uJ/0CNtzVxbE7paKYRzHYv4+NM65OD7oFuuh+UUzrJT/OTNUtlb5\njP65oM72fhwy0r6M+eeRntbm3pRSOIUf13kpIjSUDLjcQykwsdMspUWCCQV+GntJ\nmDTfnv0yKut3aLp+s0I7JRoptw6xa8vDKZUwG6bAgwLIJOOTpCD+cpARjnkVVB22\n81Pe2xDIExLZVCwoTzZzsi8qggV7kVfJsGpOw7jqwlBq5lsFIsT1Om5Ai5AhetPR\n+fnFh39NYNoxWu1HX69RhLdnp7y1j0v5eTx6MtrpAQKBgQDjuB2CT3MZ8Li3JrMM\nusFEwdcU7Bu++AhzqCBQBEzygeM5/rqezv4Jpm9fydGLKSVYZSzDPl9JvoTly1WJ\njo44wOQmHWi02TDRh7bg3PRqmbJqE8pOtZs7q0BG+xkCiTJpZ1OXkRW3W//JouTd\nkVK3WXjhwYJXLvlhmTtDa2BktQKBgQDEC9rXdrpLB5n+qvUciFlf+tmXMBfsEdGY\nKkv61pvWjBA3ZMUS9OKpXc8CnQTvO7lJ9lvwZMUA3lGJBQuofSAtPXS7jO0X6W3r\nH4dOFjk+0Y6uIWmNU4rpYlbmpQKEpHNfpysVpIUCX8892k6OOe4A2/STQSd65AiV\nVIKjkA3gnwKBgHE9R39bnvNRX6nEVtmHrUBR3HENEKcglKNfAeKIoPMfYC2g3JDI\ngk+uMkhCBi/boDSa622UALKdSV00hi7HczYJxeqmSUFVmA86G9kqR2kTUUOq37nQ\nWYeMm4QwrbkzHJyJw2nlvhTWbRaKKKF9+NIwbgplvjk4pM7B8lSOevrZAoGAJuHL\nB4zOqe7aBf5WGtCYGUchPLEXLYTjMvDAnQFPax/gX3wm8fmLsteeJQCLZ/9KYnbw\nCR+TSvbM6QYNJ9+ZMB/ONRxgMavkVwurxDr4I5NgXvzVeGgnVt5gKeJ0O2Z6U3BO\nRT6Z+ryR18yiY+btY1I8kbAMan0rjqJyPoplljUCgYBPnZqbAdBGcPh/Mm2Jurjf\nF5ejfeP2uuCvinvLgedAiZPQzLUegtsLHpMeaIuK0nvFS5BnZvOAFk+IkJtMnWRh\n+GoUCOpl54upwG/D3YSjjLYoJ16bX2Rga5XHfAUDMoTPT7PVHpHsgOaYJhGQmYNI\nbNPPFNGGTK6cfbtiPXSFKQ==\n-----END PRIVATE KEY-----\n",
+  "client_email": "aquatrack-report-bot@water-management-464106.iam.gserviceaccount.com",
+  "client_id": "116376973362419607666",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/aquatrack-report-bot%40water-management-464106.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}

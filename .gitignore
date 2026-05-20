@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+.env
+*.db
+*.sqlite3
+*.log
+
+# Node / JS
+node_modules/
+
+# Flutter / Dart
+build/
+.dart_tool/
+.packages
+
+# VSCode
+.vscode/
+
+# Compiled Python files
+*.py[codz]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+dist/
+*.egg-info/
+
+# Misc
+.DS_Store
+.idea/
+*.bak
