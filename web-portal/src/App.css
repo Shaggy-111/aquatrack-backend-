@@ -1,0 +1,64 @@
+/* 🌍 Global Layout Reset */
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  background-color: #f4f6f8;
+  font-family: "Inter", Arial, sans-serif;
+}
+
+/* 🧭 Root container for all dashboards */
+.dashboard-container {
+  display: flex;
+  min-height: 100vh;
+  width: 100%;
+  background-color: #f4f6f8;
+}
+
+/* 📊 Right-hand content area */
+.dashboard-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 20px;
+  overflow-y: auto;
+}
+
+/* 🧱 Sidebar fixed height styling */
+.sidebar {
+  background-color: #102a43;
+  color: #fff;
+  min-width: 220px;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: start;
+  padding-top: 20px;
+}
+
+/* ✨ Optional UI tweaks */
+h1, h2, h3, h4, h5 {
+  margin: 0;
+  color: #102a43;
+}
+
+.card {
+  background-color: white;
+  border-radius: 10px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  padding: 1.5rem;
+}
+
+button {
+  cursor: pointer;
+}
+
+/* Remove center alignment from Vite defaults */
+#root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  text-align: left;
+}
