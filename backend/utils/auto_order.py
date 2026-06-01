@@ -11,9 +11,6 @@ def validate_store_for_auto_order(store):
     if not store.partners or len(store.partners) == 0:
         return False, "Please map Partner first"
 
-    if not store.per_day_consumption or store.per_day_consumption <= 0:
-        return False, "Please set per day consumption"
-
     return True, "OK"
 
 
@@ -64,10 +61,6 @@ def should_create_order(store, db):
     if not store.channel:
         return False, "No channel"
 
-    # ❌ Auto disabled
-    if not store.auto_order_enabled:
-        return False, "Auto order disabled"
-
     # ❌ Manager missing
     if not store.assigned_manager_id:
         return False, "Manager missing"
@@ -76,24 +69,10 @@ def should_create_order(store, db):
     if not store.partners or len(store.partners) == 0:
         return False, "Partner missing"
 
-    # ❌ Consumption missing
-    if not store.per_day_consumption or store.per_day_consumption <= 0:
-        return False, "Consumption missing"
-
     # ❌ Not order day
     if not is_order_day(store):
         return False, "Not order day"
 
-    # 🔥 CHANNEL LOGIC
-    channel = (store.channel or "").upper()
-
-    if channel == "ZEPTO":
-        return True, "OK"
-
-    elif channel == "BLINKIT":
-        return True, "OK"
-
-    # ✅ DEFAULT
     return True, "OK"
 
 
@@ -108,10 +87,15 @@ def create_auto_order(store, db: Session):
     # 1. Quantity Calculation
     # -----------------------------
     if channel == "ZEPTO":
+
         freq = int(store.order_frequency_days or 1)
-        order_qty = store.per_day_consumption * freq
+
+        consumption = int(store.per_day_consumption or 0)
+
+        order_qty = max(1, consumption * freq)
 
     elif channel == "BLINKIT":
+
         order_qty = 20
 
     else:

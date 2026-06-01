@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 from io import BytesIO
 import pandas as pd
 import asyncio
+import traceback
 
 from backend.database.db import SessionLocal
 from backend.routes.report import export_monthly_pivot
@@ -14,8 +15,10 @@ def run_google_sheet_sync():
 
     try:
         # D-7 Logic
-        today = datetime.utcnow().date()
+        today = datetime.now().date()
+
         to_date = today - timedelta(days=7)
+
         from_date = to_date.replace(day=1)
 
         print(f"\n📅 Report Range: {from_date} → {to_date}")
@@ -44,6 +47,7 @@ def run_google_sheet_sync():
 
         async def collect():
             nonlocal excel_bytes
+
             async for chunk in response.body_iterator:
                 excel_bytes += chunk
 
@@ -52,9 +56,20 @@ def run_google_sheet_sync():
         # Convert Excel to DataFrame
         df = pd.read_excel(BytesIO(excel_bytes))
 
+        print("\n========== DATAFRAME DEBUG ==========")
+
+        print("\n📌 LAST 20 ROWS:")
+        print(df.tail(20))
+
+        print("\n📌 TOTAL ROWS:")
+        print(len(df))
+
+        print("\n📌 COLUMNS:")
+        print(df.columns)
+
         # Check if report is empty
         if df.empty:
-            print("⚠️ No report data found.")
+            print("\n⚠️ No report data found.")
             return
 
         # Replace NaN values with empty strings
@@ -66,7 +81,10 @@ def run_google_sheet_sync():
         print("\n✅ Google Sheet Auto Synced Successfully\n")
 
     except Exception as e:
-        print(f"\n❌ Google Sheet Sync Failed: {e}\n")
+
+        print("\n❌ Google Sheet Sync Failed\n")
+
+        traceback.print_exc()
 
     finally:
         db.close()

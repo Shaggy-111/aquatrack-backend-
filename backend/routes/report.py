@@ -300,3 +300,481 @@ async def download_report(
         media_type='application/pdf', 
         filename=os.path.basename(report.file_path)
     )
+
+
+# ==========================================================
+# MANUAL DELIVERY EXCEL UPLOAD
+# ==========================================================
+
+@router.post("/upload-manual-delivery")
+async def upload_manual_delivery(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Upload Excel in report format and:
+    1. Update existing orders as delivered
+    2. Create missing orders and mark delivered
+    3. Set filled and empty bottles equal to uploaded quantity
+    4. Handles Outlet ID formats like:
+       - 4580
+       - 4580.0
+       - " 4580 "
+       - "04580"
+    5. Allows maximum 50 UNIQUE stores only
+    """
+
+    # --------------------------------------------------
+    # Role Validation
+    # --------------------------------------------------
+    if current_user.role != RoleEnum.superadmin:
+        raise HTTPException(
+            status_code=403,
+            detail="Only Super Admin can upload manual delivery data."
+        )
+
+    # --------------------------------------------------
+    # File Validation
+    # --------------------------------------------------
+    if not file.filename.lower().endswith((".xlsx", ".xls")):
+        raise HTTPException(
+            status_code=400,
+            detail="Please upload a valid Excel file."
+        )
+
+    # --------------------------------------------------
+    # Read Excel File
+    # --------------------------------------------------
+    try:
+        contents = await file.read()
+        df = pd.read_excel(BytesIO(contents))
+
+        # Remove completely blank rows
+        df = df.dropna(how="all")
+
+        # Remove completely blank columns
+        df = df.dropna(axis=1, how="all")
+
+        # Clean column names
+        df.columns = [str(col).strip() for col in df.columns]
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unable to read Excel file: {str(e)}"
+        )
+
+    # --------------------------------------------------
+    # Validate Required Column
+    # --------------------------------------------------
+    if "Outlet ID" not in df.columns:
+        raise HTTPException(
+            status_code=400,
+            detail="Excel must contain 'Outlet ID' column."
+        )
+
+    # --------------------------------------------------
+    # Static Columns to Ignore
+    # --------------------------------------------------
+    ignore_columns = {
+        "Region",
+        "Entity",
+        "STATE",
+        "City",
+        "Outlet ID",
+        "Outlet Name",
+        "POC Name",
+        "Contact No",
+        "PRIMARY VENDOR NAME",
+        "PRIMARY LICENSE NUMBER",
+        "SECONDARY VENDOR NAME",
+        "SECONDARY LICENSE NUMBER",
+        "Total Count"
+    }
+
+    # --------------------------------------------------
+    # Detect Date Columns
+    # --------------------------------------------------
+    date_columns = [
+        col for col in df.columns
+        if str(col).strip() not in ignore_columns
+    ]
+
+    if not date_columns:
+        raise HTTPException(
+            status_code=400,
+            detail="No date columns found in Excel."
+        )
+
+    # --------------------------------------------------
+    # Count Unique Stores (ROBUST FIX)
+    # Counts only rows having at least one positive quantity
+    # --------------------------------------------------
+    for col in date_columns:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    valid_rows = df[
+        df[date_columns]
+        .fillna(0)
+        .gt(0)
+        .any(axis=1)
+    ].copy()
+
+    if valid_rows.empty:
+        raise HTTPException(
+            status_code=400,
+            detail="No delivery quantities found in Excel."
+        )
+
+    cleaned_outlet_ids = (
+        valid_rows["Outlet ID"]
+        .fillna("")
+        .astype(str)
+        .str.replace(".0", "", regex=False)
+        .str.strip()
+    )
+
+    cleaned_outlet_ids = cleaned_outlet_ids[
+        (cleaned_outlet_ids != "") &
+        (~cleaned_outlet_ids.str.lower().isin(
+            ["nan", "none", "null"]
+        ))
+    ]
+
+    unique_stores = cleaned_outlet_ids.unique()
+
+    print("=" * 80)
+    print("VALID ROWS:", len(valid_rows))
+    print("UNIQUE STORES:", len(unique_stores))
+    print("STORE IDS:", unique_stores.tolist())
+    print("=" * 80)
+
+    if len(unique_stores) > 50:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Maximum 50 stores allowed per upload. "
+                f"Found {len(unique_stores)} stores."
+            )
+        )
+
+    # --------------------------------------------------
+    # Parse Date Column Names
+    # Example: "01-May"
+    # --------------------------------------------------
+    def parse_day_column(column_name: str) -> date:
+        try:
+            column_name = str(column_name).strip()
+
+            day_part, month_part = column_name.split("-")
+            day_num = int(day_part)
+
+            month_map = {
+                "Jan": 1,
+                "Feb": 2,
+                "Mar": 3,
+                "Apr": 4,
+                "May": 5,
+                "Jun": 6,
+                "Jul": 7,
+                "Aug": 8,
+                "Sep": 9,
+                "Oct": 10,
+                "Nov": 11,
+                "Dec": 12
+            }
+
+            month_num = month_map[month_part[:3].title()]
+            current_year = datetime.utcnow().year
+
+            return date(current_year, month_num, day_num)
+
+        except Exception:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid date column format: {column_name}"
+            )
+
+    # --------------------------------------------------
+    # Counters
+    # --------------------------------------------------
+    stores_processed = 0
+    orders_updated = 0
+    orders_created = 0
+    skipped = 0
+    unknown_stores = []
+
+    # --------------------------------------------------
+    # Process Each Row
+    # --------------------------------------------------
+    for _, row in valid_rows.iterrows():
+
+        # ----------------------------------------------
+        # Normalize Outlet ID + Outlet Name
+        # ----------------------------------------------
+        outlet_raw = row.get("Outlet ID", "")
+        outlet_name = str(
+            row.get("Outlet Name", "")
+        ).strip()
+
+        # Skip if both missing
+        if pd.isna(outlet_raw) and not outlet_name:
+            continue
+
+        # Convert Outlet ID safely
+        try:
+            if pd.isna(outlet_raw):
+                outlet_id = ""
+            elif isinstance(outlet_raw, (int, float)):
+                outlet_id = str(int(outlet_raw))
+            else:
+                outlet_id = (
+                    str(outlet_raw)
+                    .replace(".0", "")
+                    .strip()
+                )
+        except Exception:
+            outlet_id = (
+                str(outlet_raw)
+                .replace(".0", "")
+                .strip()
+            )
+
+        # Normalize invalid strings
+        if outlet_id.lower() in ["nan", "none", "null"]:
+            outlet_id = ""
+
+        normalized_outlet_id = (
+            outlet_id.lstrip("0") or "0"
+        )
+
+        # ----------------------------------------------
+        # Store Lookup
+        # ----------------------------------------------
+        store = None
+
+        # 1. Exact match by Store ID
+        if outlet_id:
+            store = (
+                db.query(Store)
+                .filter(Store.id == outlet_id)
+                .first()
+            )
+
+        # 2. Trimmed match
+        if not store and outlet_id:
+            store = (
+                db.query(Store)
+                .filter(func.trim(Store.id) == outlet_id)
+                .first()
+            )
+
+        # 3. Leading-zero insensitive match
+        if not store and outlet_id:
+            all_stores = db.query(Store).all()
+
+            for candidate in all_stores:
+                candidate_id = str(candidate.id).strip()
+                candidate_normalized = (
+                    candidate_id.lstrip("0") or "0"
+                )
+
+                if candidate_normalized == normalized_outlet_id:
+                    store = candidate
+                    break
+
+        # 4. Exact Outlet Name match
+        if not store and outlet_name:
+            store = (
+                db.query(Store)
+                .filter(
+                    func.lower(
+                        func.trim(Store.store_name)
+                    ) == outlet_name.lower()
+                )
+                .first()
+            )
+
+        # 5. Partial Outlet Name match
+        if not store and outlet_name:
+            store = (
+                db.query(Store)
+                .filter(
+                    func.lower(Store.store_name).contains(
+                        outlet_name.lower()
+                    )
+                )
+                .first()
+            )
+
+        # ----------------------------------------------
+        # Store Not Found
+        # ----------------------------------------------
+        if not store:
+            print(
+                f"❌ Store not found | "
+                f"Outlet ID: {outlet_id} | "
+                f"Outlet Name: {outlet_name}"
+            )
+
+            unknown_stores.append({
+                "outlet_id": outlet_id,
+                "outlet_name": outlet_name
+            })
+
+            skipped += 1
+            continue
+
+        stores_processed += 1
+
+        # ----------------------------------------------
+        # Validate Partner and Manager
+        # ----------------------------------------------
+        partner = (
+            store.partners[0]
+            if store.partners
+            else None
+        )
+
+        manager_id = store.assigned_manager_id
+
+        if not partner or not manager_id:
+            print(
+                f"⚠️ Skipped {store.id}: "
+                f"Partner or Manager missing"
+            )
+            skipped += 1
+            continue
+
+        # ----------------------------------------------
+        # Process Each Date Column
+        # ----------------------------------------------
+        for col in date_columns:
+            raw_value = row.get(col)
+
+            # Skip blank cells
+            if pd.isna(raw_value):
+                continue
+
+            # Convert quantity
+            try:
+                qty = int(float(raw_value))
+            except Exception:
+                continue
+
+            # Skip zero or negative
+            if qty <= 0:
+                continue
+
+            # Parse delivery date
+            delivery_date = parse_day_column(col)
+
+            # ------------------------------------------
+            # Find Existing Order
+            # ------------------------------------------
+            existing_order = (
+                db.query(Order)
+                .filter(
+                    Order.store_id == store.id,
+                    func.date(Order.order_date)
+                    == delivery_date
+                )
+                .order_by(Order.id.desc())
+                .first()
+            )
+
+            # ------------------------------------------
+            # Update Existing Order
+            # ------------------------------------------
+            if existing_order:
+                existing_order.status = (
+                    OrderStatusEnum.delivered_confirmed
+                )
+                existing_order.order_details = str(qty)
+                existing_order.total_amount = 0
+                existing_order.bottles_delivered = qty
+                existing_order.empty_bottles_collected = qty
+                existing_order.confirmed_empty_bottles = qty
+                existing_order.confirmed_bottles = qty
+                existing_order.store_confirmed = True
+                existing_order.delivered_by = "Excel Upload"
+                existing_order.vehicle_info = "Manual Upload"
+                existing_order.order_date = datetime.combine(
+                    delivery_date,
+                    datetime.min.time()
+                )
+                existing_order.updated_at = datetime.utcnow()
+
+                orders_updated += 1
+
+            # ------------------------------------------
+            # Create New Order
+            # ------------------------------------------
+            else:
+                try:
+                    new_order = Order(
+                        partner_id=partner.id,
+                        store_id=store.id,
+                        assigned_to_manager_id=manager_id,
+                        order_details=str(qty),
+                        total_amount=0,
+                        status=(
+                            OrderStatusEnum
+                            .delivered_confirmed
+                        ),
+                        channel=store.channel,
+                        order_date=datetime.combine(
+                            delivery_date,
+                            datetime.min.time()
+                        ),
+                        bottles_delivered=qty,
+                        empty_bottles_collected=qty,
+                        confirmed_empty_bottles=qty,
+                        confirmed_bottles=qty,
+                        store_confirmed=True,
+                        delivered_by="Excel Upload",
+                        vehicle_info="Manual Upload"
+                    )
+
+                    db.add(new_order)
+                    db.flush()
+
+                    orders_created += 1
+
+                except Exception as create_error:
+                    print(
+                        f"❌ Failed to create order "
+                        f"for Store {store.id}: "
+                        f"{str(create_error)}"
+                    )
+                    db.rollback()
+                    skipped += 1
+                    continue
+
+    # --------------------------------------------------
+    # Commit Database
+    # --------------------------------------------------
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Database error: {str(e)}"
+        )
+
+    # --------------------------------------------------
+    # Response
+    # --------------------------------------------------
+    return {
+        "success": True,
+        "message": "Manual delivery upload completed successfully.",
+        "stores_processed": stores_processed,
+        "orders_updated": orders_updated,
+        "orders_created": orders_created,
+        "skipped": skipped,
+        "unknown_stores": unknown_stores,
+        "date_columns_processed": date_columns,
+        "unique_stores_found": len(unique_stores)
+    }

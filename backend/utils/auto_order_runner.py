@@ -1,5 +1,6 @@
 from datetime import datetime
 from sqlalchemy import func
+from sqlalchemy.orm import joinedload
 
 from backend.database.db import SessionLocal
 from backend.models.store import Store
@@ -7,7 +8,8 @@ from backend.models.order import Order
 
 from backend.utils.auto_order import (
     should_create_order,
-    create_auto_order
+    create_auto_order,
+    is_order_day
 )
 
 
@@ -36,8 +38,9 @@ def run_auto_order():
 
     try:
 
-        stores = db.query(Store).filter(
-            Store.per_day_consumption > 0
+        # ✅ LOAD PARTNERS PROPERLY
+        stores = db.query(Store).options(
+            joinedload(Store.partners)
         ).all()
 
         total_stores = len(stores)
@@ -59,19 +62,28 @@ def run_auto_order():
 
                 db.refresh(store)
 
-                # ❌ Skip if auto order disabled
-                if hasattr(store, "auto_order_enabled") and not store.auto_order_enabled:
+                # =========================================
+                # DEBUG LOGS
+                # =========================================
+                print(f"""
+==================================================
+STORE NAME           : {store.store_name}
+STORE ID             : {store.id}
 
-                    failed_count += 1
+AUTO ENABLED         : {store.auto_order_enabled}
+CHANNEL              : {store.channel}
 
-                    failed_reasons.append({
-                        "store": store.id,
-                        "reason": "Auto order disabled"
-                    })
+MANAGER ID           : {store.assigned_manager_id}
 
-                    print(f"⛔ {store.id} → Auto order disabled")
+PARTNERS COUNT       : {len(store.partners) if store.partners else 0}
 
-                    continue
+PER DAY CONSUMPTION  : {store.per_day_consumption}
+
+LAST ORDER DATE      : {store.last_order_date}
+
+IS ORDER DAY         : {is_order_day(store)}
+==================================================
+""")
 
                 # ❌ Skip if already ordered today
                 if already_auto_ordered_today(store.id, db):
@@ -98,10 +110,14 @@ def run_auto_order():
 
                     continue
 
-                # ✅ Create order
+                # ✅ CREATE ORDER
+                print(f"🚀 Creating order for {store.id}")
+
                 create_auto_order(store, db)
 
                 success_count += 1
+
+                print(f"✅ SUCCESS → {store.id}")
 
             except Exception as store_error:
 

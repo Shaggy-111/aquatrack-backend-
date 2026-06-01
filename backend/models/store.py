@@ -87,6 +87,12 @@ class Store(Base):
         cascade="all, delete-orphan"
     )
 
+    compliance_documents = relationship(
+        "StoreComplianceDocument",
+        back_populates="store",
+        cascade="all, delete-orphan"
+    )
+
     # -------------------------------------------------
     # String Representation
     # -------------------------------------------------

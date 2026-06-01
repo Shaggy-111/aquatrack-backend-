@@ -906,37 +906,61 @@ def update_order_status_with_photo(
 
     if delivery_date:
         try:
-            selected_date = datetime.strptime(delivery_date, "%Y-%m-%d")
+            selected_date = datetime.strptime(
+                delivery_date,
+                "%Y-%m-%d"
+            )
 
             # Use order_date if available, otherwise created_at
-            order_base_date = order.order_date or order.created_at
+            order_base_date = (
+                order.order_date
+                or order.created_at
+            )
 
             if order_base_date:
-                if selected_date.date() < order_base_date.date():
+                if (
+                    selected_date.date()
+                    < order_base_date.date()
+                ):
                     raise HTTPException(
                         status_code=400,
-                        detail="Delivery date cannot be before order date."
+                        detail=(
+                            "Delivery date cannot "
+                            "be before order date."
+                        )
                     )
 
-            if selected_date.date() > datetime.now().date():
+            if (
+                selected_date.date()
+                > datetime.now().date()
+            ):
                 raise HTTPException(
                     status_code=400,
-                    detail="Delivery date cannot be in the future."
+                    detail=(
+                        "Delivery date cannot "
+                        "be in the future."
+                    )
                 )
 
             # Keep current time, replace only date portion
             now = datetime.now()
-            selected_delivery_datetime = selected_date.replace(
-                hour=now.hour,
-                minute=now.minute,
-                second=now.second,
-                microsecond=now.microsecond
+
+            selected_delivery_datetime = (
+                selected_date.replace(
+                    hour=now.hour,
+                    minute=now.minute,
+                    second=now.second,
+                    microsecond=now.microsecond
+                )
             )
 
         except ValueError:
             raise HTTPException(
                 status_code=400,
-                detail="Invalid delivery date format. Use YYYY-MM-DD."
+                detail=(
+                    "Invalid delivery date format. "
+                    "Use YYYY-MM-DD."
+                )
             )
 
     # ---------------------------------------------------
@@ -946,13 +970,20 @@ def update_order_status_with_photo(
 
     if photo:
         try:
-            filename = f"order_{order_id}_{photo.filename}"
-            filepath = os.path.join(UPLOADS_DIR, filename)
+            filename = (
+                f"order_{order_id}_{photo.filename}"
+            )
+
+            filepath = os.path.join(
+                UPLOADS_DIR,
+                filename
+            )
 
             with open(filepath, "wb+") as f:
                 shutil.copyfileobj(photo.file, f)
 
             photo_url = f"/{UPLOADS_DIR}/{filename}"
+
             order.delivery_photo_url = photo_url
 
         finally:
@@ -968,7 +999,9 @@ def update_order_status_with_photo(
     # 🆕 EMPTY BOTTLES COLLECTED
     # ---------------------------------------------------
     if empty_bottles_collected is not None:
-        order.empty_bottles_collected = empty_bottles_collected
+        order.empty_bottles_collected = (
+            empty_bottles_collected
+        )
 
     # ---------------------------------------------------
     # 🚚 VEHICLE INFO
@@ -981,61 +1014,24 @@ def update_order_status_with_photo(
     # ---------------------------------------------------
     if delivered_by:
         order.delivered_by = delivered_by
+
     elif not order.delivered_by:
         # Auto-fill if frontend doesn't send this field
         order.delivered_by = current_user.full_name
 
     # ---------------------------------------------------
-    # 🔥 ZEPTO LOGIC
+    # ✅ SIMPLE DELIVERY FLOW
     # ---------------------------------------------------
-    if (
-        order.store
-        and order.store.channel
-        and order.store.channel.upper() == "ZEPTO"
-    ):
-        # 🔴 MONTHLY CAP CHECK
-        month_start = datetime.utcnow().replace(day=1)
+    if status in [
+        OrderStatusEnum.delivered_confirmed,
+        OrderStatusEnum.delivered_pending_confirmation
+    ]:
 
-        delivered_orders = db.query(Order).filter(
-            Order.store_id == order.store.id,
-            Order.status == OrderStatusEnum.delivered_confirmed,
-            Order.order_date >= month_start
-        ).all()
-
-        total_delivered = sum(
-            int(o.order_details)
-            for o in delivered_orders
-            if str(o.order_details).isdigit()
-        )
-
-        current_qty = int(order.order_details or 0)
-
-        # Exclude current order if already delivered
-        if order.status == OrderStatusEnum.delivered_confirmed:
-            total_delivered -= current_qty
-
-        if (
-            order.store.monthly_cap
-            and (total_delivered + current_qty > order.store.monthly_cap)
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Monthly cap reached "
-                    f"({order.store.monthly_cap}). Cannot mark delivered."
-                )
-            )
-
-        # ✅ ALLOW DELIVERY
-        order.status = OrderStatusEnum.delivered_confirmed
-        order.delivered_at = selected_delivery_datetime
-
-    # ---------------------------------------------------
-    # 🔵 NORMAL FLOW
-    # ---------------------------------------------------
-    elif status == OrderStatusEnum.delivered_pending_confirmation:
         order.status = status
-        order.delivered_at = selected_delivery_datetime
+
+        order.delivered_at = (
+            selected_delivery_datetime
+        )
 
     else:
         raise HTTPException(
@@ -1060,29 +1056,50 @@ def update_order_status_with_photo(
     # 💾 SAVE
     # ---------------------------------------------------
     db.commit()
+
     db.refresh(order)
 
     return {
         "message": (
             "Order delivered successfully."
-            if order.status == OrderStatusEnum.delivered_confirmed
-            else "Order marked delivered, waiting for store confirmation."
+            if (
+                order.status
+                == OrderStatusEnum.delivered_confirmed
+            )
+            else (
+                "Order marked delivered, "
+                "waiting for store confirmation."
+            )
         ),
+
         "order_id": order.id,
+
         "photo_url": photo_url,
-        "bottles_delivered": order.bottles_delivered,
-        "empty_bottles_collected": order.empty_bottles_collected,
-        "vehicle_info": order.vehicle_info,
-        "delivered_by": order.delivered_by,
+
+        "bottles_delivered":
+            order.bottles_delivered,
+
+        "empty_bottles_collected":
+            order.empty_bottles_collected,
+
+        "vehicle_info":
+            order.vehicle_info,
+
+        "delivered_by":
+            order.delivered_by,
+
         "delivered_at": (
             order.delivered_at.isoformat()
             if order.delivered_at
             else None
         ),
-        "marked_by": current_user.role.value,
-        "status": order.status.value
-    }
 
+        "marked_by":
+            current_user.role.value,
+
+        "status":
+            order.status.value
+    }
 
 # ---------------------------
 # NEW API Endpoints for Data Export

@@ -18,4 +18,4 @@ modules = [
 
 for module in modules:
     importlib.import_module(f"backend.models.{module}")
-
+from .store_compliance import StoreComplianceDocument

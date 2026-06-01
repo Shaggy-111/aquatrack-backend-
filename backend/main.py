@@ -20,6 +20,8 @@ from backend.utils.auto_order_runner import run_auto_order
 from backend.utils.google_sheet_auto_sync import run_google_sheet_sync
 
 
+
+
 from .routes import (
     user as user_route,
     admin as admin_route,
@@ -33,7 +35,7 @@ from .routes import (
     forgot_password,
     complaints as complaints_route,
 )
-
+from .routes import store_compliance
 # ✅ Create tables
 Base.metadata.create_all(bind=engine)
 
@@ -77,7 +79,14 @@ app.include_router(commercial_route.router, tags=["Commercial"], prefix="/commer
 app.include_router(region_route.router, tags=["Region"], prefix="/region")
 app.include_router(partners_route.router, tags=["Partners"], prefix="/partners")
 
-app.include_router(store_route.router, tags=["Store"])
+app.include_router(
+    store_route.router,
+    tags=["Store"],
+    prefix="/store"
+)
+app.include_router(
+    store_compliance.router
+)
 app.include_router(attendance_route.router, tags=["Attendance"])
 app.include_router(orders_route.router, tags=["Orders"])
 

@@ -73,3 +73,22 @@ class StoreOut(BaseModel):
 
     class Config:
         from_attributes = True
+class StoreDeliverySummary(BaseModel):
+
+    store_id: str
+    store_name: str
+
+    city: Optional[str] = None
+    state: Optional[str] = None
+
+    channel: Optional[str] = None
+
+    month_delivered_bottles: int = 0
+    week_delivered_bottles: int = 0
+
+    total_orders: int = 0
+
+    last_delivery_date: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
