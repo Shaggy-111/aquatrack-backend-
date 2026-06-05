@@ -14,6 +14,7 @@ from .routes import delivery_reports
 from .routes import store_reports
 from .routes import attendance as attendance_route
 from .routes import vendor_license
+from .routes import app_version
 
 from .routes.delivery_manager import router as delivery_manager_router
 from backend.utils.auto_order_runner import run_auto_order
@@ -109,6 +110,7 @@ app.include_router(reports_route.router, tags=["Reports"], prefix="/reports")
 
 app.include_router(delivery_reports.router)
 app.include_router(store_reports.router)
+app.include_router(app_version.router)
 
 # -----------------------------
 # ROOT

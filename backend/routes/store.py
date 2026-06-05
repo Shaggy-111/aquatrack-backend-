@@ -457,8 +457,8 @@ def get_store_analytics(
                 "delivered_pending_confirmation"
             ]),
 
-            extract("month", Order.updated_at) == month,
-            extract("year", Order.updated_at) == year
+            extract("month", Order.order_date) == month,
+            extract("year", Order.order_date) == year
         )
         .scalar()
     ) or 0
@@ -469,13 +469,13 @@ def get_store_analytics(
         .filter(
             Order.store_id == store_id,
 
-            extract("month", Order.updated_at) == month,
-            extract("year", Order.updated_at) == year
+            extract("month", Order.order_date) == month,
+            extract("year", Order.order_date) == year
         )
         .count()
     )
 
-    # WEEKLY BOTTLES INSIDE SELECTED MONTH
+    # WEEKLY BOTTLES (currently same logic as monthly in your code)
     weekly_bottles = (
         db.query(
             func.sum(Order.bottles_delivered)
@@ -488,8 +488,8 @@ def get_store_analytics(
                 "delivered_pending_confirmation"
             ]),
 
-            extract("month", Order.updated_at) == month,
-            extract("year", Order.updated_at) == year
+            extract("month", Order.order_date) == month,
+            extract("year", Order.order_date) == year
         )
         .scalar()
     ) or 0
@@ -502,4 +502,3 @@ def get_store_analytics(
         "weekly": weekly_bottles,
         "orders": total_orders
     }
-
