@@ -14,15 +14,10 @@ from ..utils.auth import get_current_user
 import shutil # Example for saving files locally
 import os     # Example for saving files locally
 from datetime import datetime # Add this line
-from pydantic import BaseModel, EmailStr
 
 
 
-class EmployeeCreateRequest(BaseModel):
-    full_name: str
-    email: EmailStr
-    password: str
-    mobile_number: str
+
 
 router = APIRouter()
 
@@ -175,40 +170,3 @@ async def create_user(
 
 # Keep other routes (/login, /me, /users) as they are
 
-@router.post("/superadmin/create-employee")
-def create_employee(
-    request: EmployeeCreateRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    # 🔒 Only superadmin
-    if current_user.role != ModelRoleEnum.superadmin:
-        raise HTTPException(status_code=403, detail="Only superadmin allowed")
-
-    # 🔁 Duplicate check
-    existing = db.query(User).filter(User.email == request.email).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="Email already registered")
-
-    # 🔐 Hash password
-    hashed_pwd = hash_password(request.password)
-
-    # 👤 Create employee
-    new_employee = User(
-        full_name=request.full_name,
-        email=request.email,
-        password=hashed_pwd,
-        mobile_number=request.mobile_number,
-        role=ModelRoleEnum.employee,   # ✅ IMPORTANT
-        status="active",
-        parent_id=current_user.id
-    )
-
-    db.add(new_employee)
-    db.commit()
-    db.refresh(new_employee)
-
-    return {
-        "message": "Employee created successfully",
-        "user_id": new_employee.id
-    }

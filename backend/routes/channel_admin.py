@@ -30,7 +30,8 @@ def channel_admin_dashboard(
     # 📦 FETCH STORES
     # =====================================================
     stores = db.query(Store).filter(
-        func.lower(Store.channel) == channel
+        func.lower(Store.channel) == channel,
+        Store.is_active.is_(True),
     ).all()
 
     store_map = {s.id: s for s in stores}
@@ -112,7 +113,14 @@ def channel_admin_dashboard(
 
         # ⚠️ Avoid raw SQLAlchemy objects (future safe)
         "stores": [
-            {"id": s.id, "name": s.store_name , "city": s.city, "state": s.state} for s in stores
+            {
+                "id": s.id,
+                "name": s.store_name,
+                "city": s.city,
+                "state": s.state,
+                "is_active": s.is_active,
+            }
+            for s in stores
         ],
         "partners": [
             {"id": p.id, "name": p.full_name} for p in partners

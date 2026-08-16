@@ -13,12 +13,45 @@ from ..models.store import Store
 from ..models.complaint import Complaint, ComplaintStatusEnum
 from ..schemas.complaint import ComplaintCreate, ComplaintOut, ComplaintResolve
 from ..utils.jwt import get_current_user
+from ..utils.permissions import get_employee_store_ids, require_permission
 
 router = APIRouter(prefix="/complaints", tags=["Complaints"])
 
 # Upload directory
 COMPLAINTS_UPLOADS_DIR = "uploads/complaints"
 os.makedirs(COMPLAINTS_UPLOADS_DIR, exist_ok=True)
+
+
+def employee_permission_required(
+    permission_key: str,
+    current_user: User,
+    db: Session
+):
+    if current_user.role == RoleEnum.employee:
+        require_permission(permission_key)(
+            current_user=current_user,
+            db=db
+        )
+
+
+def employee_store_access_required(
+    store_id: str,
+    current_user: User,
+    db: Session
+):
+    if current_user.role != RoleEnum.employee:
+        return
+
+    assigned_store_ids = get_employee_store_ids(
+        current_user.id,
+        db=db
+    )
+
+    if store_id not in assigned_store_ids:
+        raise HTTPException(
+            status_code=403,
+            detail="Store not assigned to you."
+        )
 
 
 # ------------------ SUBMIT COMPLAINT ------------------
@@ -36,6 +69,18 @@ async def submit_complaint(
     store = db.query(Store).filter(Store.id == store_id).first()
     if not store:
         raise HTTPException(404, "Store not found")
+
+    if current_user.role == RoleEnum.employee:
+        employee_permission_required(
+            "complaints.create",
+            current_user,
+            db
+        )
+        employee_store_access_required(
+            store_id,
+            current_user,
+            db
+        )
 
     channel = store.channel.upper()
 
@@ -98,6 +143,21 @@ def get_my_complaints(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    if current_user.role == RoleEnum.employee:
+        employee_permission_required(
+            "complaints.view",
+            current_user,
+            db
+        )
+        store_filter = Complaint.store_id.in_(
+            get_employee_store_ids(
+                current_user.id,
+                db=db
+            )
+        )
+    else:
+        store_filter = Complaint.id != None
+
     complaints = (
         db.query(Complaint)
         .options(
@@ -105,7 +165,10 @@ def get_my_complaints(
             joinedload(Complaint.assigned_admin),
             joinedload(Complaint.assigned_channel_admin)
         )
-        .filter(Complaint.created_by_id == current_user.id)
+        .filter(
+            Complaint.created_by_id == current_user.id,
+            store_filter
+        )
         .order_by(Complaint.created_at.desc())
         .all()
     )
@@ -119,6 +182,24 @@ def get_complaints_assigned_to_me(
     current_user: User = Depends(get_current_user)
 ):
 
+    if current_user.role == RoleEnum.employee:
+        employee_permission_required(
+            "complaints.view",
+            current_user,
+            db
+        )
+        assigned_filter = Complaint.store_id.in_(
+            get_employee_store_ids(
+                current_user.id,
+                db=db
+            )
+        )
+    else:
+        assigned_filter = (
+            (Complaint.assigned_to_admin_id == current_user.id) |
+            (Complaint.assigned_to_channel_admin_id == current_user.id)
+        )
+
     complaints = (
         db.query(Complaint)
         .join(Store, Complaint.store_id == Store.id)
@@ -127,10 +208,7 @@ def get_complaints_assigned_to_me(
             joinedload(Complaint.assigned_admin),
             joinedload(Complaint.assigned_channel_admin)
         )
-        .filter(
-            (Complaint.assigned_to_admin_id == current_user.id) |
-            (Complaint.assigned_to_channel_admin_id == current_user.id)
-        )
+        .filter(assigned_filter)
         .order_by(Complaint.created_at.desc())
         .all()
     )
@@ -150,7 +228,18 @@ def resolve_complaint(
     if not complaint:
         raise HTTPException(404, "Complaint not found.")
 
-    if not (
+    if current_user.role == RoleEnum.employee:
+        employee_permission_required(
+            "complaints.edit",
+            current_user,
+            db
+        )
+        employee_store_access_required(
+            complaint.store_id,
+            current_user,
+            db
+        )
+    elif not (
         current_user.role == RoleEnum.superadmin or
         complaint.assigned_to_admin_id == current_user.id or
         complaint.assigned_to_channel_admin_id == current_user.id
@@ -175,10 +264,23 @@ def get_complaints_for_channel_admin(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    if current_user.role != RoleEnum.channel_admin:
+    if current_user.role == RoleEnum.employee:
+        employee_permission_required(
+            "complaints.view",
+            current_user,
+            db
+        )
+        store_filter = Complaint.store_id.in_(
+            get_employee_store_ids(
+                current_user.id,
+                db=db
+            )
+        )
+    elif current_user.role != RoleEnum.channel_admin:
         raise HTTPException(403, "Only channel admins can access this.")
-
-    channel = current_user.channel.upper()
+    else:
+        channel = current_user.channel.upper()
+        store_filter = func.upper(Store.channel) == channel
 
     complaints = (
         db.query(Complaint)
@@ -189,7 +291,7 @@ def get_complaints_for_channel_admin(
             joinedload(Complaint.assigned_channel_admin),
             joinedload(Complaint.store)  # optional
         )
-        .filter(func.upper(Store.channel) == channel)   # ✅ FIXED
+        .filter(store_filter)   # ✅ FIXED
         .order_by(Complaint.created_at.desc())
         .all()
     )

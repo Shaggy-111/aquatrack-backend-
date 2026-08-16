@@ -1,10 +1,8 @@
-from datetime import datetime
-from sqlalchemy import func
 from sqlalchemy.orm import joinedload
 
 from backend.database.db import SessionLocal
 from backend.models.store import Store
-from backend.models.order import Order
+from backend.utils.same_day_order import same_day_non_cancelled_order_query
 
 from backend.utils.auto_order import (
     should_create_order,
@@ -17,16 +15,7 @@ from backend.utils.auto_order import (
 # Prevent duplicate SYSTEM orders
 # -----------------------------
 def already_auto_ordered_today(store_id, db):
-
-    today = datetime.utcnow().date()
-
-    existing = db.query(Order).filter(
-        Order.store_id == store_id,
-        func.date(Order.order_date) == today,
-        Order.status == "assigned_to_manager"
-    ).first()
-
-    return existing is not None
+    return same_day_non_cancelled_order_query(db, store_id).first() is not None
 
 
 # -----------------------------
@@ -41,6 +30,9 @@ def run_auto_order():
         # ✅ LOAD PARTNERS PROPERLY
         stores = db.query(Store).options(
             joinedload(Store.partners)
+        ).filter(
+            Store.is_active.is_(True),
+            Store.auto_order_enabled.is_(True)
         ).all()
 
         total_stores = len(stores)
@@ -113,7 +105,10 @@ IS ORDER DAY         : {is_order_day(store)}
                 # ✅ CREATE ORDER
                 print(f"🚀 Creating order for {store.id}")
 
-                create_auto_order(store, db)
+                created = create_auto_order(store, db)
+                if not created:
+                    already_count += 1
+                    continue
 
                 success_count += 1
 

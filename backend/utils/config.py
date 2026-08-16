@@ -1,17 +1,38 @@
-# File: backend/config.py
+import os
+from dotenv import load_dotenv
+from pydantic_settings import BaseSettings
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+# ---------------------------------------
+# Environment Selection
+# ---------------------------------------
+
+APP_ENV = os.getenv("APP_ENV", "local").lower()
+
+ENV_FILES = {
+    "local": ".env.local",
+    "stage": ".env.stage",
+    "production": ".env.production",
+}
+
+env_file = ENV_FILES.get(APP_ENV, ".env.local")
+
+# Fly Secrets always win because override=False
+load_dotenv(env_file, override=False)
+
 
 class Settings(BaseSettings):
-    # Your JWT Secret Key for token encoding/decoding
+    APP_ENV: str = APP_ENV
+
+    DATABASE_URL: str | None = None
+
     SECRET_KEY: str
 
-    # The algorithm used for JWT
     ALGORITHM: str = "HS256"
 
-    # The access token lifetime in minutes
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
 
-    model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8')
+    class Config:
+        extra = "ignore"
+
 
 settings = Settings()

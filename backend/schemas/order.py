@@ -72,6 +72,13 @@ class OrderPatch(BaseModel):
 class OrderUpdateStatusSchema(BaseModel):
     status: str
 
-    # Note: If this schema is used ONLY for the simple JSON update (before photo),
-    # it might become redundant or need renaming after adding the FormData endpoint.
-    # However, it doesn't hurt to keep it for now.
+class DeliveryOrderListItem(BaseModel):
+    id: int
+    status: str
+    store_name: str | None = None
+    channel: str | None = None
+    pending_empty_bottles: int = 0
+    created_at: datetime | None = None
+
+    class Config:
+        from_attributes = True

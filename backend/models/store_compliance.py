@@ -40,7 +40,6 @@ class StoreComplianceDocument(Base):
     # -------------------------------------------------
     # DOCUMENT TYPE
     # -------------------------------------------------
-    # water_card / invoice
     document_type = Column(
         String(50),
         nullable=False
@@ -49,23 +48,48 @@ class StoreComplianceDocument(Base):
     # -------------------------------------------------
     # DATE TRACKING
     # -------------------------------------------------
-    year = Column(Integer, nullable=False)
+    year = Column(
+        Integer,
+        nullable=False
+    )
 
-    # 1-12
-    month = Column(Integer, nullable=False)
+    month = Column(
+        Integer,
+        nullable=False
+    )
 
-    # only for water cards
-    week_number = Column(Integer, nullable=True)
+    week_number = Column(
+        Integer,
+        nullable=True
+    )
+
+    # -------------------------------------------------
+    # NEW
+    # MULTI PAGE SUPPORT
+    # -------------------------------------------------
+    page_number = Column(
+        Integer,
+        nullable=False,
+        default=1
+    )
 
     # -------------------------------------------------
     # FILE
     # -------------------------------------------------
-    file_url = Column(String, nullable=False)
+    file_url = Column(
+        String,
+        nullable=False
+    )
 
-    remarks = Column(Text, nullable=True)
+    remarks = Column(
+        Text,
+        nullable=True
+    )
 
-    # uploaded / approved / rejected
-    status = Column(String(20), default="uploaded")
+    status = Column(
+        String(20),
+        default="uploaded"
+    )
 
     created_at = Column(
         DateTime,
@@ -93,6 +117,7 @@ class StoreComplianceDocument(Base):
             f"store_id={self.store_id}, "
             f"type={self.document_type}, "
             f"month={self.month}, "
-            f"week={self.week_number}"
+            f"week={self.week_number}, "
+            f"page={self.page_number}"
             f")>"
         )

@@ -4,8 +4,9 @@ from fastapi.staticfiles import StaticFiles
 import os
 
 from .database.db import Base, engine
-from .scheduler import scheduler
+from .scheduler import scheduler, schedule_monthly_virtual_card_startup_recovery
 from threading import Thread
+from backend.config import settings
 # ROUTERS
 from .routes.channel_admin import router as channel_admin_router
 from .routes import bottle as bottle_route
@@ -15,7 +16,15 @@ from .routes import store_reports
 from .routes import attendance as attendance_route
 from .routes import vendor_license
 from .routes import app_version
-
+from .routes import employee_store_assignments
+from .routes import employee_permissions
+from .routes import employee_menu
+from .routes import employees
+from .routes import permissions
+from .routes import dashboard
+from .routes import store_qr_delivery
+from .routes import monthly_virtual_cards
+from .routes import blinkit_reports
 from .routes.delivery_manager import router as delivery_manager_router
 from backend.utils.auto_order_runner import run_auto_order
 from backend.utils.google_sheet_auto_sync import run_google_sheet_sync
@@ -50,6 +59,7 @@ app.add_middleware(
     allow_origins=[
         "https://veekayaquatech.com",
         "https://www.veekayaquatech.com",
+        "https://stage.veekayaquatech.com",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:3000",
@@ -85,6 +95,7 @@ app.include_router(
     tags=["Store"],
     prefix="/store"
 )
+app.include_router(store_route.status_router)
 app.include_router(
     store_compliance.router
 )
@@ -103,6 +114,12 @@ app.include_router(
     prefix="/channel-admin"
 )
 
+app.include_router(
+    dashboard.router,
+    tags=["Dashboard"],
+    prefix="/dashboard"
+)
+
 app.include_router(forgot_password.router, tags=["Auth & OTP"], prefix="/auth")
 app.include_router(bottle_route.router, tags=["Bottle"], prefix="/bottle")
 app.include_router(complaints_route.router, tags=["Complaints"], prefix="/complaints")
@@ -111,6 +128,16 @@ app.include_router(reports_route.router, tags=["Reports"], prefix="/reports")
 app.include_router(delivery_reports.router)
 app.include_router(store_reports.router)
 app.include_router(app_version.router)
+app.include_router(employee_store_assignments.router)
+app.include_router(employee_menu.router)
+app.include_router(employee_permissions.router)
+app.include_router(employees.router)
+app.include_router(permissions.router)
+app.include_router(store_qr_delivery.router)
+app.include_router(monthly_virtual_cards.router)
+app.include_router(blinkit_reports.router)
+
+
 
 # -----------------------------
 # ROOT
@@ -125,25 +152,22 @@ def root():
 @app.on_event("startup")
 def start_scheduler():
 
+    # Stage / Local -> No scheduler
+    if settings.APP_ENV != "production":
+        print(f"🟡 {settings.APP_ENV.upper()} MODE")
+        print("🚫 Scheduler Disabled")
+        print("🚫 Auto Order Disabled")
+        print("🚫 Google Sheet Sync Disabled")
+        return
+
     if not scheduler.running:
+        schedule_monthly_virtual_card_startup_recovery()
         scheduler.start()
 
-        # Auto Order
-        run_auto_order()
+        # TEMPORARILY DISABLED FOR DEBUGGING
+        # run_auto_order()
 
-        # Google Sheet Sync in separate thread
-        print("🚀 Starting Google Sheet Sync...")
-        Thread(target=run_google_sheet_sync).start()
+        # print("🚀 Starting Google Sheet Sync...")
+        # Thread(target=run_google_sheet_sync).start()
 
-    print("✅ Scheduler started")
-# -----------------------------
-# RUN
-# -----------------------------
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(
-        "backend.main:app",
-        host="0.0.0.0",
-        port=int(os.environ.get("PORT", 8080)),
-        reload=False,
-    )
+    print("✅ Production Scheduler Started")

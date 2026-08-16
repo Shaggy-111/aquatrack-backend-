@@ -10,11 +10,34 @@ from ..utils.jwt import get_current_user
 from ..models.user import User, RoleEnum
 from ..models.order import Order, OrderStatusEnum
 from ..models.store import Store
+from ..utils.permissions import (
+    filter_query_by_employee_stores,
+    get_employee_store_ids,
+    require_permission,
+)
+from .delivery_reports import (
+    effective_delivered_expression,
+    effective_empty_expression,
+    ist_date_range_utc,
+)
 
 router = APIRouter(
-    prefix="/delivery-reports",
+    prefix="/store-reports",
     tags=["Store Reports"]
 )
+
+
+def employee_permission_required(
+    permission_key: str,
+    current_user: User,
+    db: Session
+):
+    if current_user.role == RoleEnum.employee:
+        require_permission(permission_key)(
+            current_user=current_user,
+            db=db
+        )
+
 
 @router.get("/store-summary")
 def store_summary(
@@ -26,6 +49,12 @@ def store_summary(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    employee_permission_required(
+        "store_reports.view",
+        current_user,
+        db
+    )
+
     query = (
         db.query(
             Store.id.label("store_id"),
@@ -34,8 +63,8 @@ def store_summary(
             Store.city,
             Order.channel,
             func.count(Order.id).label("total_orders"),
-            func.sum(Order.bottles_delivered).label("total_cans"),
-            func.sum(Order.empty_bottles_collected).label("total_empty"),
+            func.sum(effective_delivered_expression()).label("total_cans"),
+            func.sum(effective_empty_expression()).label("total_empty"),
             func.sum(
                 case(
                     (
@@ -62,12 +91,20 @@ def store_summary(
     if current_user.role == RoleEnum.partner:
         query = query.filter(Order.partner_id == current_user.id)
 
+    if current_user.role == RoleEnum.employee:
+        store_ids = get_employee_store_ids(current_user.id, db=db)
+        if not store_ids:
+            return {"rows": []}
+        query = filter_query_by_employee_stores(query, current_user)
+
     # 📅 Date filters
     if from_date:
-        query = query.filter(Order.created_at >= from_date)
+        start_utc, _ = ist_date_range_utc(from_date, from_date)
+        query = query.filter(Order.order_date >= start_utc)
 
     if to_date:
-        query = query.filter(Order.created_at <= to_date)
+        _, end_utc = ist_date_range_utc(to_date, to_date)
+        query = query.filter(Order.order_date < end_utc)
 
     # 🏙 Filters
     if state:

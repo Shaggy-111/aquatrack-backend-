@@ -1,8 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import func, case, and_
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from ..database.db import get_db
 from ..utils.jwt import get_current_user
@@ -11,6 +12,7 @@ from ..models.order import Order, OrderStatusEnum
 from ..models.store import Store
 from sqlalchemy.orm import Session, joinedload
 from ..models.partner_store import PartnerStore
+from ..utils.permissions import get_employee_store_ids, require_permission
 import os
 
 router = APIRouter(
@@ -18,7 +20,92 @@ router = APIRouter(
     tags=["Delivery Reports"]
 )
 
+IST = ZoneInfo("Asia/Kolkata")
+
+
+def ist_date_range_utc(start_date: date, end_date: date):
+    """Return inclusive IST date bounds as an exclusive UTC timestamp range."""
+    start_ist = datetime.combine(start_date, time.min, tzinfo=IST)
+    end_ist = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=IST)
+    return start_ist.astimezone(timezone.utc), end_ist.astimezone(timezone.utc)
+
+
+def order_date_in_ist(value: datetime) -> datetime:
+    # PostgreSQL timestamptz values are aware. Treat a legacy naive value as UTC.
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(IST)
+
+
+def effective_delivered_expression():
+    return case(
+        (
+            Order.status == OrderStatusEnum.delivered_confirmed,
+            func.coalesce(Order.confirmed_bottles, Order.bottles_delivered, 0),
+        ),
+        else_=func.coalesce(Order.bottles_delivered, 0),
+    )
+
+
+def effective_empty_expression():
+    return case(
+        (
+            Order.status == OrderStatusEnum.delivered_confirmed,
+            func.coalesce(
+                Order.confirmed_empty_bottles,
+                Order.empty_bottles_collected,
+                0,
+            ),
+        ),
+        else_=func.coalesce(Order.empty_bottles_collected, 0),
+    )
+
+
+def effective_delivered_value(order: Order) -> int:
+    if order.status == OrderStatusEnum.delivered_confirmed:
+        value = order.confirmed_bottles
+        if value is not None:
+            return int(value)
+    return int(order.bottles_delivered or 0)
+
+
+def effective_empty_value(order: Order) -> int:
+    if order.status == OrderStatusEnum.delivered_confirmed:
+        value = order.confirmed_empty_bottles
+        if value is not None:
+            return int(value)
+    return int(order.empty_bottles_collected or 0)
+
+
+def aggregate_effective_delivered_by_ist_date(orders):
+    totals = {}
+    for order in orders:
+        business_date = order_date_in_ist(order.order_date).date()
+        totals[business_date] = (
+            totals.get(business_date, 0) + effective_delivered_value(order)
+        )
+    return totals
+
 # --- Helper for Permissions ---
+def employee_permission_required(
+    permission_key: str,
+    current_user: User,
+    db: Session
+):
+    if current_user.role == RoleEnum.employee:
+        require_permission(permission_key)(
+            current_user=current_user,
+            db=db
+        )
+
+
+def employee_store_ids_required(current_user: User, db: Session):
+    store_ids = get_employee_store_ids(current_user.id, db=db)
+    if not store_ids:
+        return []
+    return store_ids
+
+
 def apply_role_filters(query, current_user):
     if current_user.role == RoleEnum.superadmin:
         return query
@@ -32,6 +119,10 @@ def apply_role_filters(query, current_user):
 
     if current_user.role == RoleEnum.delivery_manager:
         return query.filter(Store.assigned_manager_id == current_user.id)
+
+    if current_user.role == RoleEnum.employee:
+        store_ids = get_employee_store_ids(current_user.id, db=query.session)
+        return query.filter(Order.store_id.in_(store_ids))
 
     raise HTTPException(status_code=403, detail="Not authorized")
 
@@ -47,6 +138,12 @@ def get_orders(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    employee_permission_required(
+        "delivery_reports.view",
+        current_user,
+        db
+    )
+
     try:
         start_dt = datetime.strptime(from_date, "%Y-%m-%d")
         end_dt = datetime.strptime(to_date, "%Y-%m-%d")
@@ -61,10 +158,11 @@ def get_orders(
     ).join(Store)
 
     # ✅ DATE FILTER (IMPORTANT)
+    start_utc, end_utc = ist_date_range_utc(start_dt.date(), end_dt.date())
     query = query.filter(
         Order.order_date.isnot(None),
-        func.date(Order.order_date) >= start_dt.date(),
-        func.date(Order.order_date) <= end_dt.date(),
+        Order.order_date >= start_utc,
+        Order.order_date < end_utc,
     )
 
     # ✅ STATUS FIX (🔥 MAIN FIX)
@@ -81,9 +179,17 @@ def get_orders(
     if city and city not in ["All Cities", ""]:
         query = query.filter(Store.city == city)
 
-    if current_user.role == RoleEnum.channel_admin:
-        query = query.filter(func.upper(Order.channel) == current_user.channel.upper())
-    elif channel and channel not in ["All Entities", ""]:
+    if current_user.role in [
+        RoleEnum.channel_admin,
+        RoleEnum.partner,
+        RoleEnum.delivery_manager,
+        RoleEnum.employee,
+    ]:
+        query = apply_role_filters(query, current_user)
+    elif current_user.role != RoleEnum.superadmin:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    if current_user.role != RoleEnum.channel_admin and channel and channel not in ["All Entities", ""]:
         query = query.filter(func.upper(Order.channel) == channel.upper())
 
     orders = query.all()
@@ -117,7 +223,7 @@ def get_orders(
         if not o.order_date:
             continue
 
-        date_str = o.order_date.strftime(f"%{day_fmt}-%b")
+        date_str = order_date_in_ist(o.order_date).strftime(f"%{day_fmt}-%b")
         key = f"{s.id}_{s.city}"
 
         if key not in pivot_map:
@@ -136,7 +242,7 @@ def get_orders(
                 "Total Count": 0
             }
 
-        cans = int(o.bottles_delivered or 0)
+        cans = effective_delivered_value(o)
 
         pivot_map[key]["daily"][date_str] += cans
         pivot_map[key]["Total Count"] += cans
@@ -163,12 +269,18 @@ def get_store_summary(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    employee_permission_required(
+        "delivery_reports.view",
+        current_user,
+        db
+    )
+
     query = db.query(
         Store.id.label("store_id"),
         Store.store_name.label("outlet_name"),
         func.count(Order.id).label("total_orders"),
-        func.sum(Order.bottles_delivered).label("total_cans"),
-        func.sum(Order.empty_bottles_collected).label("total_empty"),
+        func.sum(effective_delivered_expression()).label("total_cans"),
+        func.sum(effective_empty_expression()).label("total_empty"),
         func.sum(
             case((Order.status != OrderStatusEnum.delivered_confirmed, 1), else_=0)
         ).label("incomplete"),
@@ -182,6 +294,12 @@ def get_store_summary(
         query = query.filter(Order.partner_id == current_user.id)
     elif current_user.role == RoleEnum.superadmin:
         pass
+    elif current_user.role == RoleEnum.employee:
+        query = query.filter(
+            Store.id.in_(
+                employee_store_ids_required(current_user, db)
+            )
+        )
     else:
         raise HTTPException(status_code=403, detail="Not authorized")
 
@@ -210,18 +328,24 @@ def get_daily_summary(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    employee_permission_required(
+        "delivery_reports.view",
+        current_user,
+        db
+    )
+
     query = db.query(
-        func.date(Order.created_at).label("delivery_date"),
+        func.date(func.timezone("Asia/Kolkata", Order.order_date)).label("delivery_date"),
         func.count(Order.id).label("total_orders"),
-        func.sum(Order.bottles_delivered).label("total_cans"),
-        func.sum(Order.empty_bottles_collected).label("total_empty")
+        func.sum(effective_delivered_expression()).label("total_cans"),
+        func.sum(effective_empty_expression()).label("total_empty")
     ).join(Store)
 
     query = apply_role_filters(query, current_user)
 
     results = (
-        query.group_by(func.date(Order.created_at))
-        .order_by(func.date(Order.created_at).desc())
+        query.group_by(func.date(func.timezone("Asia/Kolkata", Order.order_date)))
+        .order_by(func.date(func.timezone("Asia/Kolkata", Order.order_date)).desc())
         .all()
     )
 
@@ -234,6 +358,12 @@ def get_exceptions(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    employee_permission_required(
+        "delivery_reports.view",
+        current_user,
+        db
+    )
+
     time_threshold = datetime.now() - timedelta(hours=24)
 
     query = db.query(Order).join(Store).filter(

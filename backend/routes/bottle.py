@@ -21,8 +21,41 @@ from ..models.transaction import Transaction
 # Import the new schema and existing ones
 from ..schemas.bottle import BottleAssignRequest, BottleScanRequest, BottleOut, CollectableBottleOut
 from ..utils.jwt import get_current_user
+from ..utils.permissions import get_employee_store_ids, require_permission
 
 router = APIRouter()
+
+
+def employee_permission_required(
+    permission_key: str,
+    current_user: User,
+    db: Session
+):
+    if current_user.role == RoleEnum.employee:
+        require_permission(permission_key)(
+            current_user=current_user,
+            db=db
+        )
+
+
+def employee_store_access_required(
+    store_id: str,
+    current_user: User,
+    db: Session
+):
+    if current_user.role != RoleEnum.employee:
+        return
+
+    assigned_store_ids = get_employee_store_ids(
+        current_user.id,
+        db=db
+    )
+
+    if str(store_id) not in assigned_store_ids:
+        raise HTTPException(
+            status_code=403,
+            detail="Store not assigned to you."
+        )
 
 
 # ---------------------------
@@ -39,7 +72,13 @@ def generate_qr(
     Usage:
       /bottle/superadmin/generate-qr?count=10
     """
-    if current_user.role != RoleEnum.superadmin:
+    if current_user.role == RoleEnum.employee:
+        employee_permission_required(
+            "bottles.create",
+            current_user,
+            db
+        )
+    elif current_user.role != RoleEnum.superadmin:
         raise HTTPException(status_code=403, detail="Only superadmins can generate QRs.")
 
     if count <= 0:
@@ -79,6 +118,14 @@ def get_unassigned_bottles(
     Retrieves a list of all bottles with a status of 'CREATED'
     that are available for assignment.
     """
+    if current_user.role == RoleEnum.employee:
+        employee_permission_required(
+            "bottles.view",
+            current_user,
+            db
+        )
+        return []
+
     if current_user.role != RoleEnum.superadmin:
         raise HTTPException(status_code=403, detail="Only superadmins can view unassigned bottles.")
 
@@ -103,6 +150,17 @@ def assign_bottles(
     """
 
     # --- Role validation ---
+    if current_user.role == RoleEnum.employee:
+        employee_permission_required(
+            "bottles.assign",
+            current_user,
+            db
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="Employee bottle assignment requires a store-scoped assignment endpoint."
+        )
+
     if current_user.role != RoleEnum.superadmin:
         raise HTTPException(status_code=403, detail="Only superadmins can assign bottles.")
 
@@ -180,6 +238,18 @@ def get_my_bottles(
     current_user: User = Depends(get_current_user)
 ):
     """ Lists bottles currently assigned to the delivery partner (status WITH_DELIVERY) """
+    if current_user.role == RoleEnum.employee:
+        employee_permission_required(
+            "bottles.view",
+            current_user,
+            db
+        )
+        return db.query(Bottle).filter(
+            Bottle.assigned_to_store_id.in_(
+                get_employee_store_ids(current_user.id, db=db)
+            )
+        ).all()
+
     if current_user.role != RoleEnum.delivery:
         raise HTTPException(status_code=403, detail="Only delivery partners can view their bottles.")
 
@@ -202,17 +272,25 @@ def get_collectable_bottles(
     where the delivery partner has active or pending orders.
     """
 
-    if current_user.role != RoleEnum.delivery:
+    if current_user.role == RoleEnum.employee:
+        employee_permission_required(
+            "bottles.view",
+            current_user,
+            db
+        )
+        store_ids = get_employee_store_ids(current_user.id, db=db)
+    elif current_user.role != RoleEnum.delivery:
         raise HTTPException(status_code=403, detail="Only delivery partners can view collectable bottles.")
+    else:
 
-    # 🔹 Step 1: Find all stores this delivery partner has orders from
-    # (via Transaction table)
-    store_ids = db.query(Transaction.to_location_id).filter(
-        Transaction.delivery_boy_id == current_user.id,
-        Transaction.transaction_type == "Delivery"
-    ).distinct().all()
+        # 🔹 Step 1: Find all stores this delivery partner has orders from
+        # (via Transaction table)
+        store_ids = db.query(Transaction.to_location_id).filter(
+            Transaction.delivery_boy_id == current_user.id,
+            Transaction.transaction_type == "Delivery"
+        ).distinct().all()
 
-    store_ids = [s[0] for s in store_ids if s[0] is not None]
+        store_ids = [s[0] for s in store_ids if s[0] is not None]
 
     if not store_ids:
         return []
@@ -251,6 +329,14 @@ def get_bottles_ready_for_warehouse(
     Shows all bottles currently WITH_DELIVERY for this delivery partner.
     These are eligible to be submitted to the warehouse.
     """
+    if current_user.role == RoleEnum.employee:
+        employee_permission_required(
+            "bottles.view",
+            current_user,
+            db
+        )
+        return []
+
     if current_user.role != RoleEnum.delivery:
         raise HTTPException(status_code=403, detail="Only delivery partners can access this list.")
 
@@ -275,7 +361,13 @@ def get_bottle_summary(
     Only accessible by Super Admins.
     """
     # 🔹 Role validation
-    if current_user.role != RoleEnum.superadmin:
+    if current_user.role == RoleEnum.employee:
+        employee_permission_required(
+            "bottles.view",
+            current_user,
+            db
+        )
+    elif current_user.role != RoleEnum.superadmin:
         raise HTTPException(
             status_code=403,
             detail="Only superadmins can view bottle summary."
@@ -283,11 +375,16 @@ def get_bottle_summary(
 
     try:
         # 🔹 Fetch counts grouped by status
-        status_counts = (
-            db.query(Bottle.status, func.count(Bottle.uuid))  # ✅ FIXED func reference
-            .group_by(Bottle.status)
-            .all()
-        )
+        status_query = db.query(Bottle.status, func.count(Bottle.uuid))
+
+        if current_user.role == RoleEnum.employee:
+            status_query = status_query.filter(
+                Bottle.assigned_to_store_id.in_(
+                    get_employee_store_ids(current_user.id, db=db)
+                )
+            )
+
+        status_counts = status_query.group_by(Bottle.status).all()
 
         # 🔹 Convert result to dictionary
         summary = {status: count for status, count in status_counts}
@@ -323,12 +420,29 @@ def get_all_bottle_details(
     - Assigned store (if any)
     - Cycle count and last collected date
     """
-    if current_user.role != RoleEnum.superadmin:
+    if current_user.role == RoleEnum.employee:
+        employee_permission_required(
+            "bottles.view",
+            current_user,
+            db
+        )
+    elif current_user.role != RoleEnum.superadmin:
         raise HTTPException(status_code=403, detail="Only superadmins can view bottle details.")
 
-    bottles = (
+    bottles_query = (
         db.query(Bottle)
         .options(joinedload(Bottle.store), joinedload(Bottle.delivery_partner))
+    )
+
+    if current_user.role == RoleEnum.employee:
+        bottles_query = bottles_query.filter(
+            Bottle.assigned_to_store_id.in_(
+                get_employee_store_ids(current_user.id, db=db)
+            )
+        )
+
+    bottles = (
+        bottles_query
         .order_by(Bottle.last_collected_at.desc().nullslast())
         .all()
     )
@@ -361,10 +475,25 @@ def download_qr_stickers(
       - Text printed below QR: same qr_code (for reading on sticker)
     Only bottles with status 'CREATED' are included.
     """
-    if current_user.role != RoleEnum.superadmin:
+    if current_user.role == RoleEnum.employee:
+        employee_permission_required(
+            "bottles.export",
+            current_user,
+            db
+        )
+    elif current_user.role != RoleEnum.superadmin:
         raise HTTPException(status_code=403, detail="Only superadmins can download QR stickers.")
 
-    bottles = db.query(Bottle).filter(Bottle.status == "CREATED").all()
+    bottles_query = db.query(Bottle).filter(Bottle.status == "CREATED")
+
+    if current_user.role == RoleEnum.employee:
+        bottles_query = bottles_query.filter(
+            Bottle.assigned_to_store_id.in_(
+                get_employee_store_ids(current_user.id, db=db)
+            )
+        )
+
+    bottles = bottles_query.all()
     if not bottles:
         raise HTTPException(status_code=404, detail="No QR codes found.")
 
@@ -451,7 +580,14 @@ def get_collectable_bottles_at_store(
     """
     
     # Security check: Only delivery partners can call this
-    if current_user.role != RoleEnum.delivery:
+    if current_user.role == RoleEnum.employee:
+        employee_permission_required(
+            "bottles.view",
+            current_user,
+            db
+        )
+        employee_store_access_required(str(store_id), current_user, db)
+    elif current_user.role != RoleEnum.delivery:
         raise HTTPException(
             status_code=403, 
             detail="You are not authorized to perform this action."
@@ -504,13 +640,24 @@ def get_bottle_status(
     # Let's restrict to Delivery for now, consistent with previous code
 ):
     # Allow Superadmin OR Delivery to check status
-    if current_user.role not in [RoleEnum.delivery, RoleEnum.superadmin]:
+    if current_user.role == RoleEnum.employee:
+        employee_permission_required(
+            "bottles.view",
+            current_user,
+            db
+        )
+    elif current_user.role not in [RoleEnum.delivery, RoleEnum.superadmin]:
            raise HTTPException(status_code=403, detail="Permission denied.")
 
 
     bottle = db.query(Bottle).options(joinedload(Bottle.store)).filter(Bottle.qr_code == qr_code).first()
     if not bottle:
         raise HTTPException(status_code=404, detail="Bottle not found.")
+
+    if current_user.role == RoleEnum.employee:
+        if not bottle.assigned_to_store_id:
+            raise HTTPException(status_code=403, detail="Store not assigned to you.")
+        employee_store_access_required(bottle.assigned_to_store_id, current_user, db)
 
     # Simplified status return
     return {
@@ -535,7 +682,15 @@ def assign_bottle_to_store(
     Delivery partner assigns (delivers) a bottle to a store.
     Optionally links the bottle to a specific order (temporary link).
     """
-    if current_user.role != RoleEnum.delivery:
+    if current_user.role == RoleEnum.employee:
+        employee_permission_required(
+            "bottles.assign",
+            current_user,
+            db
+        )
+        if request.to_location_id:
+            employee_store_access_required(request.to_location_id, current_user, db)
+    elif current_user.role != RoleEnum.delivery:
         raise HTTPException(
             status_code=403,
             detail="Only delivery partners can assign bottles to a store."
@@ -569,6 +724,10 @@ def assign_bottle_to_store(
         order = db.query(Order).filter(Order.id == current_order_id).first()
         if not order:
             raise HTTPException(status_code=404, detail=f"Order ID '{current_order_id}' not found.")
+        if current_user.role == RoleEnum.employee:
+            employee_store_access_required(order.store_id, current_user, db)
+            if str(order.store_id) != str(request.to_location_id):
+                raise HTTPException(status_code=400, detail="Order does not belong to target store.")
         # ✅ Temporarily link this bottle to this delivery order
         bottle.current_order_id = current_order_id
 
@@ -617,7 +776,13 @@ def collect_bottle_from_store(
     Delivery partner collects a bottle from a store.
     This clears its temporary order link so the QR can be reused.
     """
-    if current_user.role != RoleEnum.delivery:
+    if current_user.role == RoleEnum.employee:
+        employee_permission_required(
+            "bottles.edit",
+            current_user,
+            db
+        )
+    elif current_user.role != RoleEnum.delivery:
         raise HTTPException(status_code=403, detail="Only delivery partners can collect bottles.")
 
     bottle = db.query(Bottle).filter(Bottle.qr_code == request.qr_code).first()
@@ -630,6 +795,8 @@ def collect_bottle_from_store(
     store_id_bottle_is_at = bottle.assigned_to_store_id
     if not store_id_bottle_is_at:
         raise HTTPException(status_code=400, detail="Bottle has no store assigned.")
+
+    employee_store_access_required(store_id_bottle_is_at, current_user, db)
 
     # --- Perform Collection ---
     from_location_id = bottle.assigned_to_store_id
@@ -671,10 +838,29 @@ def get_bottles_for_order(
     Returns all bottles currently linked to a given order_id.
     Works for superadmin, partner, or delivery roles.
     """
-    if current_user.role not in [RoleEnum.superadmin, RoleEnum.partner, RoleEnum.delivery]:
+    if current_user.role == RoleEnum.employee:
+        employee_permission_required(
+            "bottles.view",
+            current_user,
+            db
+        )
+        order = db.query(Order).filter(Order.id == order_id).first()
+        if not order:
+            raise HTTPException(status_code=404, detail=f"Order ID '{order_id}' not found.")
+        employee_store_access_required(order.store_id, current_user, db)
+    elif current_user.role not in [RoleEnum.superadmin, RoleEnum.partner, RoleEnum.delivery]:
         raise HTTPException(status_code=403, detail="Not authorized to view this data.")
 
-    bottles = db.query(Bottle).filter(Bottle.current_order_id == order_id).all()
+    bottles_query = db.query(Bottle).filter(Bottle.current_order_id == order_id)
+
+    if current_user.role == RoleEnum.employee:
+        bottles_query = bottles_query.filter(
+            Bottle.assigned_to_store_id.in_(
+                get_employee_store_ids(current_user.id, db=db)
+            )
+        )
+
+    bottles = bottles_query.all()
 
     if not bottles:
         raise HTTPException(status_code=404, detail=f"No bottles found for order ID {order_id}")
@@ -735,23 +921,34 @@ def get_all_store_empty_counts(
     current_user: User = Depends(get_current_user)
 ):
     # 🔒 Authorization
-    if current_user.role != RoleEnum.superadmin:
+    if current_user.role == RoleEnum.employee:
+        employee_permission_required(
+            "bottles.view",
+            current_user,
+            db
+        )
+    elif current_user.role != RoleEnum.superadmin:
         raise HTTPException(
             status_code=403,
             detail="Only superadmins allowed"
         )
 
     # ✅ Single source of truth: Store.pending_empty_bottles
-    stores = (
-        db.query(
-            Store.id,
-            Store.store_name,
-            Store.city,
-            Store.pending_empty_bottles
-        )
-        .order_by(Store.store_name)
-        .all()
+    stores_query = db.query(
+        Store.id,
+        Store.store_name,
+        Store.city,
+        Store.pending_empty_bottles
     )
+
+    if current_user.role == RoleEnum.employee:
+        stores_query = stores_query.filter(
+            Store.id.in_(
+                get_employee_store_ids(current_user.id, db=db)
+            )
+        )
+
+    stores = stores_query.order_by(Store.store_name).all()
 
     return [
         {
@@ -772,16 +969,23 @@ def partner_empty_bottles(
     current_user: User = Depends(get_current_user)
 ):
     # 🔒 Role check
-    if current_user.role != RoleEnum.partner:
+    if current_user.role == RoleEnum.employee:
+        employee_permission_required(
+            "bottles.view",
+            current_user,
+            db
+        )
+        store_ids = get_employee_store_ids(current_user.id, db=db)
+    elif current_user.role != RoleEnum.partner:
         raise HTTPException(status_code=403, detail="Only partners allowed")
-
-    # 🔹 Get partner store IDs
-    store_ids = [
-        row[0]
-        for row in db.query(PartnerStore.store_id)
-        .filter(PartnerStore.user_id == current_user.id)
-        .all()
-    ]
+    else:
+        # 🔹 Get partner store IDs
+        store_ids = [
+            row[0]
+            for row in db.query(PartnerStore.store_id)
+            .filter(PartnerStore.user_id == current_user.id)
+            .all()
+        ]
 
     if not store_ids:
         return {"pending_empty_bottles": 0}

@@ -1,5 +1,5 @@
 from ..database.db import Base
-from sqlalchemy import Column, Integer, String, ForeignKey, Enum, Text, DateTime
+from sqlalchemy import Boolean, Column, Integer, String, ForeignKey, Enum, Text, DateTime
 from sqlalchemy.orm import relationship, backref
 from enum import Enum as PyEnum
 from datetime import datetime
@@ -40,6 +40,9 @@ class User(Base):
     role = Column(Enum(RoleEnum), nullable=False, default=RoleEnum.customer)
     region_id = Column(Integer, ForeignKey("regions.id"), nullable=True)
     status = Column(String, default="pending", nullable=False)
+    is_deleted = Column(Boolean, default=False, nullable=False, index=True)
+    deleted_at = Column(DateTime, nullable=True)
+    deleted_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     
     parent_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     
@@ -77,7 +80,8 @@ class User(Base):
     children = relationship(
         "User", 
         backref=backref("parent", remote_side="User.id"),
-        primaryjoin="User.parent_id == User.id"
+        primaryjoin="User.parent_id == User.id",
+        foreign_keys="[User.parent_id]",
     )
 
     managed_delivery_partners = relationship(
@@ -107,6 +111,18 @@ class User(Base):
         "Complaint",
         foreign_keys="[Complaint.assigned_to_channel_admin_id]",
         back_populates="assigned_channel_admin"
+    )
+
+    employee_permissions = relationship(
+        "EmployeePermission",
+        foreign_keys="EmployeePermission.employee_id",
+        cascade="all, delete-orphan",
+    )
+
+    employee_store_mappings = relationship(
+        "EmployeeStoreMapping",
+        foreign_keys="EmployeeStoreMapping.employee_id",
+        cascade="all, delete-orphan",
     )
 
     store_associations = relationship("PartnerStore", back_populates="user")

@@ -23,6 +23,7 @@ class StoreBase(BaseModel):
     zip_code: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+    is_active: bool = True
 
 
 # ---------- Create Schema ----------
@@ -42,6 +43,7 @@ class StoreUpdate(BaseModel):
     address: Optional[str] = None
     city: Optional[str] = None
     state: Optional[str] = None
+    project_code: Optional[str] = None
     zip_code: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
@@ -63,6 +65,7 @@ class StoreOut(BaseModel):
     longitude: Optional[float] = None
     created_at: Optional[datetime] = None
     channel: Optional[str] = None
+    is_active: bool = True
 
     auto_order_enabled: bool = False
     order_frequency_days: int = 1
@@ -73,6 +76,12 @@ class StoreOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class StoreStatusUpdate(BaseModel):
+    is_active: bool
+
+
 class StoreDeliverySummary(BaseModel):
 
     store_id: str
@@ -82,6 +91,7 @@ class StoreDeliverySummary(BaseModel):
     state: Optional[str] = None
 
     channel: Optional[str] = None
+    is_active: bool = True
 
     month_delivered_bottles: int = 0
     week_delivered_bottles: int = 0

@@ -21,6 +21,9 @@ class StoreComplianceCreate(BaseModel):
     # optional for invoices
     week_number: Optional[int] = None
 
+    # NEW
+    page_number: Optional[int] = 1
+
     remarks: Optional[str] = None
 
 
@@ -42,6 +45,9 @@ class StoreComplianceOut(BaseModel):
     month: int
 
     week_number: Optional[int] = None
+
+    # NEW
+    page_number: Optional[int] = 1
 
     file_url: str
 

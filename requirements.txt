@@ -3,6 +3,7 @@ uvicorn[standard]
 
 python-dotenv
 sqlalchemy
+alembic
 
 pydantic[email]
 
@@ -36,3 +37,5 @@ apscheduler==3.11.2
 
 # 🐘 PostgreSQL
 psycopg2-binary
+
+cloudinary

@@ -9,6 +9,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship
 from datetime import datetime
+import uuid
 from sqlalchemy import Date
 
 from ..database.db import Base
@@ -37,7 +38,20 @@ class Store(Base):
     # -------------------------------------------------
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
+    entity = Column(String(100), nullable=True)
+    region = Column(String(100), nullable=True)
+    project_code = Column(String(100), nullable=True)
     channel = Column(String(30), nullable=False, default="GENERAL")
+    is_active = Column(Boolean, nullable=False, default=True, server_default="true")
+    qr_public_id = Column(
+        String(36),
+        nullable=False,
+        unique=True,
+        index=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+    qr_token_version = Column(Integer, nullable=False, default=1, server_default="1")
+    qr_enabled = Column(Boolean, nullable=False, default=True, server_default="true")
     per_day_consumption = Column(Integer, default=0)
     monthly_cap = Column(Integer, default=0)
     last_order_date = Column(Date, nullable=True)
@@ -91,6 +105,11 @@ class Store(Base):
         "StoreComplianceDocument",
         back_populates="store",
         cascade="all, delete-orphan"
+    )
+
+    qr_delivery_submissions = relationship(
+        "StoreQrDeliverySubmission",
+        back_populates="store",
     )
 
     # -------------------------------------------------

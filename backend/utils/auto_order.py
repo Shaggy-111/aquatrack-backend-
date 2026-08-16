@@ -1,174 +1,114 @@
-from datetime import datetime, timedelta
+from datetime import datetime
+
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+
 from backend.models.order import Order
+from backend.models.store import Store
+from backend.utils.same_day_order import same_day_non_cancelled_order_query
+from backend.utils.store_status import require_active_store
 
 
 def validate_store_for_auto_order(store):
+    if not store.is_active:
+        return False, "Store is inactive."
     if not store.assigned_manager_id:
         return False, "Please create Store Manager first"
-
     if not store.partners or len(store.partners) == 0:
         return False, "Please map Partner first"
-
     return True, "OK"
 
 
-# -----------------------------
-# Daily Order Check
-# -----------------------------
 def is_order_day(store):
-
-    # ✅ Naya store ho toh turant order lage
     if not store.last_order_date:
         return True
-
-    today = datetime.utcnow().date()
-
-    # ✅ Daily order logic
-    return store.last_order_date < today
+    return store.last_order_date < datetime.utcnow().date()
 
 
-# -----------------------------
-# Monthly Usage (ZEPTO only)
-# -----------------------------
 def get_monthly_usage(store_id, db: Session):
-    month_start = datetime.utcnow().replace(
-        day=1,
-        hour=0,
-        minute=0,
-        second=0
-    )
-
+    month_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0)
     orders = db.query(Order).filter(
         Order.store_id == store_id,
-        Order.order_date >= month_start
+        Order.order_date >= month_start,
     ).all()
+    return sum(
+        int(order.order_details)
+        for order in orders
+        if str(order.order_details).isdigit()
+    )
 
-    return sum([
-        int(o.order_details)
-        for o in orders
-        if str(o.order_details).isdigit()
-    ])
 
-
-# -----------------------------
-# Decision Engine
-# -----------------------------
 def should_create_order(store, db):
-
-    # ❌ No channel
+    if not store.is_active:
+        return False, "Store is inactive."
     if not store.channel:
         return False, "No channel"
-
-    # ❌ Manager missing
     if not store.assigned_manager_id:
         return False, "Manager missing"
-
-    # ❌ Partner missing
     if not store.partners or len(store.partners) == 0:
         return False, "Partner missing"
-
-    # ❌ Not order day
     if not is_order_day(store):
         return False, "Not order day"
-
     return True, "OK"
 
 
-# -----------------------------
-# Create Order
-# -----------------------------
 def create_auto_order(store, db: Session):
+    store = (
+        db.query(Store)
+        .filter(Store.id == store.id)
+        .populate_existing()
+        .with_for_update()
+        .first()
+    )
+    if not store:
+        return False
+
+    require_active_store(store)
+
+    # This is the authoritative duplicate check. It runs while the same Store
+    # row used by Store QR delivery creation is locked.
+    if same_day_non_cancelled_order_query(db, store.id).first():
+        print(f"Store {store.id} already has an order for today.")
+        db.rollback()
+        return False
 
     channel = store.channel.upper() if store.channel else ""
-
-    # -----------------------------
-    # 1. Quantity Calculation
-    # -----------------------------
     if channel == "ZEPTO":
-
-        freq = int(store.order_frequency_days or 1)
-
+        frequency = int(store.order_frequency_days or 1)
         consumption = int(store.per_day_consumption or 0)
-
-        order_qty = max(1, consumption * freq)
-
+        order_quantity = max(1, consumption * frequency)
     elif channel == "BLINKIT":
-
-        order_qty = 20
-
+        order_quantity = 20
     else:
-        return
+        db.rollback()
+        return False
 
-    # -----------------------------
-    # 2. Partner Validation
-    # -----------------------------
     partner = store.partners[0] if store.partners else None
-
     if not partner:
-        print(
-            f"⚠️ SKIP {store.id}: "
-            f"No Partner/Vendor mapped to this store."
-        )
-        return
+        print(f"SKIP {store.id}: No Partner/Vendor mapped to this store.")
+        db.rollback()
+        return False
 
-    # -----------------------------
-    # 3. Duplicate Check
-    # -----------------------------
     today = datetime.utcnow().date()
-
-    existing_auto = db.query(Order).filter(
-        Order.store_id == store.id,
-        func.date(Order.order_date) == today,
-        Order.status == "assigned_to_manager"
-    ).first()
-
-    if existing_auto:
-        print(
-            f"ℹ️ {store.id} already has "
-            f"an automated order for today."
-        )
-        return
-
-    # -----------------------------
-    # 4. Resilient Order Creation
-    # -----------------------------
     try:
-
         new_order = Order(
             partner_id=partner.id,
             store_id=store.id,
             assigned_to_manager_id=store.assigned_manager_id,
-            order_details=str(order_qty),
+            order_details=str(order_quantity),
             total_amount=0,
             status="assigned_to_manager",
             channel=store.channel,
-            order_date=datetime.utcnow()
+            order_date=datetime.utcnow(),
         )
-
         db.add(new_order)
-
-        # ✅ Update last order date
         store.last_order_date = today
-
         db.commit()
-
         print(
-            f"🚀 SUCCESS: "
-            f"{channel} | "
-            f"Store: {store.id} | "
-            f"Manager: {store.assigned_manager_id} | "
-            f"Partner: {partner.id}"
+            f"SUCCESS: {channel} | Store: {store.id} | "
+            f"Manager: {store.assigned_manager_id} | Partner: {partner.id}"
         )
-
-    except Exception as e:
-
+        return True
+    except Exception as error:
         db.rollback()
-
-        print(
-            f"❌ DATABASE ERROR for "
-            f"Store {store.id}: {str(e)}"
-        )
-
-        return
+        print(f"DATABASE ERROR for Store {store.id}: {str(error)}")
+        return False

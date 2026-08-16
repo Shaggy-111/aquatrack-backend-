@@ -3,7 +3,8 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session, joinedload
 from typing import List, Optional
 from datetime import date
-from datetime import datetime
+from datetime import datetime, timedelta
+from sqlalchemy import or_
 
 # --- (NEW IMPORTS) ---
 from fastapi import UploadFile, File, Form
@@ -24,6 +25,15 @@ from ..schemas.order import OrderOut, OrderCreate
 from ..schemas.store import StoreOut
 from ..utils.auth import hash_password
 from ..utils.jwt import get_current_user
+from ..utils.store_status import require_active_store, require_active_store_before_commit
+from ..services.order_delivery import (
+    apply_delivery_confirmation,
+    apply_delivery_update,
+)
+from ..services.monthly_virtual_card import (
+    MonthlyVirtualCardDomainError,
+    sync_order_to_monthly_virtual_card,
+)
 
 
 
@@ -35,6 +45,16 @@ router = APIRouter(prefix="/partners", tags=["Partners"])
 UPLOADS_DIR = "uploads"
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 # --- (END NEW) ---
+
+
+def _remove_new_local_photo(filepath: Optional[str]) -> None:
+    if not filepath:
+        return
+    try:
+        if os.path.isfile(filepath):
+            os.remove(filepath)
+    except OSError:
+        pass
 
 # ---------------------------
 # Schemas
@@ -398,7 +418,10 @@ def get_my_stores(
     stores = (
         db.query(Store)
         .join(PartnerStore, Store.id == PartnerStore.store_id)
-        .filter(PartnerStore.user_id == current_user.id)
+        .filter(
+            PartnerStore.user_id == current_user.id,
+            Store.is_active.is_(True),
+        )
         .all()
     )
     if not stores:
@@ -419,7 +442,8 @@ def get_delivery_manager_profile(
         raise HTTPException(status_code=403, detail="Not a delivery manager")
     return current_user
 
-# 2. NEW: Delivery Manager Orders (Fixes 403 Forbidden)
+
+
 @router.get("/delivery-manager/me/orders", response_model=List[OrderOut])
 def get_manager_area_orders(
     db: Session = Depends(get_db),
@@ -431,19 +455,386 @@ def get_manager_area_orders(
             detail="Only delivery managers can view assigned orders."
         )
 
+    seven_days_ago = datetime.utcnow() - timedelta(days=7)
+
     orders = (
         db.query(Order)
-        .filter(Order.assigned_to_manager_id == current_user.id)
+        .filter(
+            Order.assigned_to_manager_id == current_user.id,
+
+            # Pending orders only
+            Order.status.in_([
+                OrderStatusEnum.assigned_to_manager,
+                OrderStatusEnum.assigned,
+                OrderStatusEnum.in_transit
+            ]),
+
+            # Last 7 days only
+            Order.created_at >= seven_days_ago
+        )
         .options(
             joinedload(Order.store),
             joinedload(Order.partner),
             joinedload(Order.delivery_person)
         )
-        .order_by(Order.created_at.desc())
+        .order_by(
+            Order.store_id.asc(),
+            Order.created_at.desc()
+        )
         .all()
     )
 
+    print(
+        f"Manager {current_user.id} -> Orders Returned: {len(orders)}"
+    )
+
+    store_count = len(
+        set(order.store_id for order in orders)
+    )
+
+    print(
+        f"Manager {current_user.id} -> Unique Stores: {store_count}"
+    )
+
     return orders
+
+@router.get("/delivery-manager/dashboard")
+def delivery_manager_dashboard(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if current_user.role != RoleEnum.delivery_manager:
+        raise HTTPException(
+            status_code=403,
+            detail="Only delivery managers can access dashboard."
+        )
+
+    pending_orders = db.query(Order).filter(
+        Order.assigned_to_manager_id == current_user.id,
+        Order.status.in_([
+            OrderStatusEnum.assigned_to_manager,
+            OrderStatusEnum.assigned,
+            OrderStatusEnum.in_transit
+        ])
+    ).count()
+
+    delivered_orders = db.query(Order).filter(
+        Order.assigned_to_manager_id == current_user.id,
+        Order.status.in_([
+            OrderStatusEnum.delivered_confirmed,
+            OrderStatusEnum.delivered_pending_confirmation
+        ])
+    ).count()
+
+    total_orders = db.query(Order).filter(
+        Order.assigned_to_manager_id == current_user.id
+    ).count()
+
+    return {
+        "pending_orders": pending_orders,
+        "delivered_orders": delivered_orders,
+        "total_orders": total_orders
+    }
+
+@router.get("/delivery-manager/orders/pending")
+def get_manager_pending_orders(
+    page: int = 1,
+    limit: int = 20,
+    search: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if current_user.role != RoleEnum.delivery_manager:
+        raise HTTPException(
+            status_code=403,
+            detail="Only delivery managers can access pending orders."
+        )
+
+    query = (
+        db.query(Order)
+        .join(Store)
+        .options(
+            joinedload(Order.store)
+        )
+        .filter(
+            Order.assigned_to_manager_id == current_user.id,
+            Order.status.in_([
+                OrderStatusEnum.assigned_to_manager,
+                OrderStatusEnum.assigned,
+                OrderStatusEnum.in_transit
+            ])
+        )
+    )
+
+    if search:
+        query = query.filter(
+            Store.store_name.ilike(f"%{search}%")
+        )
+
+    total_count = query.count()
+
+    offset = (page - 1) * limit
+
+    orders = (
+        query
+        .order_by(Order.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    result = []
+
+    for order in orders:
+        result.append({
+            "id": order.id,
+            "status": order.status.value,
+            "store_id": order.store_id,
+            "store_name": order.store.store_name if order.store else None,
+            "channel": order.channel,
+            "pending_empty_bottles": (
+                order.store.pending_empty_bottles
+                if order.store else 0
+            ),
+            "created_at": order.created_at,
+            "order_date": order.order_date,
+            "order_details": order.order_details,
+            "total_amount": order.total_amount,
+            "assigned_to_manager_id": order.assigned_to_manager_id,
+            "delivery_person_id": order.delivery_person_id
+        })
+
+    return {
+        "data": result,
+        "has_more": (offset + limit) < total_count,
+        "total_count": total_count,
+        "page": page,
+        "limit": limit
+    }
+
+@router.get("/delivery-manager/orders/delivered")
+def get_manager_delivered_orders(
+    page: int = 1,
+    limit: int = 20,
+    search: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if current_user.role != RoleEnum.delivery_manager:
+        raise HTTPException(
+            status_code=403,
+            detail="Only delivery managers can access delivered orders."
+        )
+
+    query = (
+        db.query(Order)
+        .join(Store)
+        .options(
+            joinedload(Order.store)
+        )
+        .filter(
+            Order.assigned_to_manager_id == current_user.id,
+            Order.status.in_([
+                OrderStatusEnum.delivered_confirmed,
+                OrderStatusEnum.delivered_pending_confirmation
+            ])
+        )
+    )
+
+    if search:
+        query = query.filter(
+            Store.store_name.ilike(f"%{search}%")
+        )
+
+    total_count = query.count()
+
+    offset = (page - 1) * limit
+
+    orders = (
+        query
+        .order_by(Order.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    result = []
+
+    for order in orders:
+        result.append({
+            "id": order.id,
+            "status": order.status.value,
+            "store_id": order.store_id,
+            "store_name": order.store.store_name if order.store else None,
+            "channel": order.channel,
+            "bottles_delivered": order.bottles_delivered,
+            "empty_bottles_collected": order.empty_bottles_collected,
+            "confirmed_empty_bottles": order.confirmed_empty_bottles,
+            "confirmed_bottles": order.confirmed_bottles,
+            "store_confirmed": order.store_confirmed,
+            "created_at": order.created_at,
+            "order_date": order.order_date,
+            "delivered_at": order.delivered_at,
+            "order_details": order.order_details,
+            "total_amount": order.total_amount
+        })
+
+    return {
+        "data": result,
+        "has_more": (offset + limit) < total_count,
+        "total_count": total_count,
+        "page": page,
+        "limit": limit
+    }
+
+
+@router.get("/delivery-manager/stores-summary/pending")
+def get_pending_store_summary(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if current_user.role != RoleEnum.delivery_manager:
+        raise HTTPException(
+            status_code=403,
+            detail="Only delivery managers can access this."
+        )
+
+    orders = (
+        db.query(Order)
+        .join(Store)
+        .filter(
+            Order.assigned_to_manager_id == current_user.id,
+            Order.status.in_([
+                OrderStatusEnum.assigned_to_manager,
+                OrderStatusEnum.assigned,
+                OrderStatusEnum.in_transit
+            ])
+        )
+        .options(joinedload(Order.store))
+        .all()
+    )
+
+    def get_bottle_count(order):
+        try:
+            total = 0
+
+            if not order.order_details:
+                return 0
+
+            # Case 1: List of dicts
+            if isinstance(order.order_details, list):
+                for item in order.order_details:
+                    if isinstance(item, dict):
+                        total += int(item.get("quantity", 0) or 0)
+
+            # Case 2: Direct integer field fallback
+            elif hasattr(order, "bottles_delivered"):
+                total = int(order.bottles_delivered or 0)
+
+            return total
+
+        except Exception:
+            return 0
+
+    stores_map = {}
+
+    for order in orders:
+
+        if not order.store:
+            continue
+
+        store_id = order.store_id
+
+        if store_id not in stores_map:
+            stores_map[store_id] = {
+                "store_id": store_id,
+                "store_name": order.store.store_name,
+                "pending_empty_bottles": getattr(
+                    order.store,
+                    "pending_empty_bottles",
+                    0
+                ) or 0,
+                "total_orders": 0,
+                "total_bottles": 0,
+                "oldest_date": order.created_at
+            }
+
+        stores_map[store_id]["total_orders"] += 1
+        stores_map[store_id]["total_bottles"] += get_bottle_count(order)
+
+        if (
+            order.created_at
+            and order.created_at < stores_map[store_id]["oldest_date"]
+        ):
+            stores_map[store_id]["oldest_date"] = order.created_at
+
+    return list(stores_map.values())
+
+@router.get("/delivery-manager/stores-summary/delivered")
+def get_delivered_store_summary(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if current_user.role != RoleEnum.delivery_manager:
+        raise HTTPException(
+            status_code=403,
+            detail="Only delivery managers can access this."
+        )
+
+    orders = (
+        db.query(Order)
+        .join(Store)
+        .filter(
+            Order.assigned_to_manager_id == current_user.id,
+            Order.status.in_([
+                OrderStatusEnum.delivered_confirmed,
+                OrderStatusEnum.delivered_pending_confirmation
+            ])
+        )
+        .options(joinedload(Order.store))
+        .all()
+    )
+
+    stores_map = {}
+
+    for order in orders:
+
+        if not order.store:
+            continue
+
+        store_id = order.store_id
+
+        if store_id not in stores_map:
+
+            stores_map[store_id] = {
+                "store_id": store_id,
+                "store_name": order.store.store_name,
+                "completed_orders": 0,
+                "total_bottles": 0
+            }
+
+        stores_map[store_id]["completed_orders"] += 1
+
+        bottles = 0
+
+        if hasattr(order, "confirmed_bottles"):
+            bottles = int(order.confirmed_bottles or 0)
+
+        if bottles == 0 and hasattr(order, "bottles_delivered"):
+            bottles = int(order.bottles_delivered or 0)
+
+        stores_map[store_id]["total_bottles"] += bottles
+
+    return sorted(
+        list(stores_map.values()),
+        key=lambda x: x["completed_orders"],
+        reverse=True
+    )
+
+
+
+
+
 
 
 # ---------------------------------------------------------------------------------------
@@ -495,6 +886,8 @@ def create_order(
             detail="You do not have permission to create an order for this store."
         )
 
+    require_active_store(store)
+
     # 2️⃣ Decide assignment (SINGLE SOURCE OF TRUTH)
     assigned_manager_id = None
     initial_status = OrderStatusEnum.pending
@@ -526,6 +919,7 @@ def create_order(
     )
 
     db.add(new_order)
+    require_active_store_before_commit(db, store.id)
     db.commit()
     db.refresh(new_order)
 
@@ -967,6 +1361,7 @@ def update_order_status_with_photo(
     # 📸 SAVE DELIVERY PHOTO
     # ---------------------------------------------------
     photo_url = order.delivery_photo_url
+    new_photo_path = None
 
     if photo:
         try:
@@ -982,6 +1377,7 @@ def update_order_status_with_photo(
             with open(filepath, "wb+") as f:
                 shutil.copyfileobj(photo.file, f)
 
+            new_photo_path = filepath
             photo_url = f"/{UPLOADS_DIR}/{filename}"
 
             order.delivery_photo_url = photo_url
@@ -992,48 +1388,32 @@ def update_order_status_with_photo(
     # ---------------------------------------------------
     # 🧴 BOTTLES DELIVERED
     # ---------------------------------------------------
-    if bottles_delivered is not None:
-        order.bottles_delivered = bottles_delivered
+    resolved_delivered_by = delivered_by
+    if not resolved_delivered_by and not order.delivered_by:
+        resolved_delivered_by = current_user.full_name
 
     # ---------------------------------------------------
     # 🆕 EMPTY BOTTLES COLLECTED
     # ---------------------------------------------------
-    if empty_bottles_collected is not None:
-        order.empty_bottles_collected = (
-            empty_bottles_collected
-        )
+    # Delivery field mutations are applied together after status validation.
 
     # ---------------------------------------------------
     # 🚚 VEHICLE INFO
     # ---------------------------------------------------
-    if vehicle_info:
-        order.vehicle_info = vehicle_info
+    # Vehicle information is applied by the shared delivery service.
 
     # ---------------------------------------------------
     # 👤 DELIVERED BY
     # ---------------------------------------------------
-    if delivered_by:
-        order.delivered_by = delivered_by
-
-    elif not order.delivered_by:
-        # Auto-fill if frontend doesn't send this field
-        order.delivered_by = current_user.full_name
+    # Delivered-by fallback is resolved above without changing existing behavior.
 
     # ---------------------------------------------------
     # ✅ SIMPLE DELIVERY FLOW
     # ---------------------------------------------------
-    if status in [
+    if status not in [
         OrderStatusEnum.delivered_confirmed,
         OrderStatusEnum.delivered_pending_confirmation
     ]:
-
-        order.status = status
-
-        order.delivered_at = (
-            selected_delivery_datetime
-        )
-
-    else:
         raise HTTPException(
             status_code=400,
             detail="Invalid status update."
@@ -1046,16 +1426,33 @@ def update_order_status_with_photo(
     # - Delivery Partner: same behavior as before
     # - Delivery Manager: same behavior as before
     # - Super Admin: DO NOT overwrite delivery_person_id
-    if current_user.role in [
-        RoleEnum.delivery,
-        RoleEnum.delivery_manager
-    ]:
-        order.delivery_person_id = current_user.id
+    apply_delivery_update(
+        order,
+        status=status,
+        delivered_at=selected_delivery_datetime,
+        bottles_delivered=bottles_delivered,
+        empty_bottles_collected=empty_bottles_collected,
+        photo_url=photo_url if photo else None,
+        vehicle_info=vehicle_info,
+        delivered_by=resolved_delivered_by,
+        actor_id=current_user.id,
+        actor_role=current_user.role,
+    )
 
     # ---------------------------------------------------
     # 💾 SAVE
     # ---------------------------------------------------
-    db.commit()
+    try:
+        sync_order_to_monthly_virtual_card(db, order)
+        db.commit()
+    except MonthlyVirtualCardDomainError:
+        db.rollback()
+        _remove_new_local_photo(new_photo_path)
+        raise
+    except Exception:
+        db.rollback()
+        _remove_new_local_photo(new_photo_path)
+        raise
 
     db.refresh(order)
 
@@ -1222,7 +1619,8 @@ def list_delivery_managers(
                     "id": store.id,
                     "store_name": store.store_name,
                     "city": store.city,
-                    "channel": store.channel
+                    "channel": store.channel,
+                    "is_active": store.is_active,
                 }
                 for store in stores
             ]
@@ -1381,67 +1779,64 @@ def confirm_order_delivery(
         )
 
     # ⛔ Status guard
+    # -----------------------------
+    # ✅ CONFIRM DELIVERY
+    # -----------------------------
+    # Values are returned by the shared confirmation service below.
+
+    # ✅ Save confirmed empty bottles if column exists
+    # Confirmation fields are applied after the Store is loaded.
+
+    # -----------------------------
+    # ✅ UPDATE STORE RUNNING BALANCE (FIXED ✅)
+    # -----------------------------
+    store = (
+        db.query(Store)
+        .filter(Store.id == order.store_id)
+        .with_for_update()
+        .first()
+    )
+    if not store:
+        raise HTTPException(status_code=404, detail="Store not found.")
+
+    order = (
+        db.query(Order)
+        .filter(Order.id == order_id)
+        .populate_existing()
+        .with_for_update()
+        .first()
+    )
     if order.status != OrderStatusEnum.delivered_pending_confirmation:
         raise HTTPException(
             status_code=400,
             detail="Order not awaiting confirmation."
         )
 
-    # -----------------------------
-    # ✅ CONFIRM DELIVERY
-    # -----------------------------
-    order.status = OrderStatusEnum.delivered_confirmed
-    order.store_confirmed = True
-
-    # Confirm filled bottles
-    delivered = body.confirmed_bottles or order.bottles_delivered or 0
-    order.confirmed_bottles = delivered
-
-    # Confirm empty bottles collected
-    collected = (
-        body.confirmed_empty_bottles
-        if body.confirmed_empty_bottles is not None
-        else order.empty_bottles_collected or 0
-    )
-
-    # ✅ Save confirmed empty bottles if column exists
-    if hasattr(order, "confirmed_empty_bottles"):
-        order.confirmed_empty_bottles = collected
-
-    # -----------------------------
-    # ✅ UPDATE STORE RUNNING BALANCE (FIXED ✅)
-    # -----------------------------
-    store = db.query(Store).filter(Store.id == order.store_id).first()
-    if not store:
-        raise HTTPException(status_code=404, detail="Store not found.")
-
     # ✅ Safe handling if pending_empty_bottles is None
-    current_pending = store.pending_empty_bottles or 0
-    current_pending = current_pending + delivered - collected
-
-    # Safety guard
-    if current_pending < 0:
-        current_pending = 0
-
-    store.pending_empty_bottles = current_pending
+    delivered, collected = apply_delivery_confirmation(
+        order,
+        store,
+        confirmed_bottles=body.confirmed_bottles,
+        confirmed_empty_bottles=body.confirmed_empty_bottles,
+        confirmation_remarks=body.confirmation_remarks,
+    )
 
     # -----------------------------
     # 📝 Remarks
     # -----------------------------
-    order.confirmation_remarks = (
-        body.confirmation_remarks or "Confirmed by store."
-    )
+    # Remarks are applied by the shared delivery service.
 
     # -----------------------------
     # 💾 COMMIT (with rollback safety)
     # -----------------------------
     try:
+        sync_order_to_monthly_virtual_card(db, order)
         db.commit()
         db.refresh(order)
         db.refresh(store)
-    except Exception as e:
+    except Exception:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Confirm delivery failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Confirm delivery failed.")
 
     return {
         "message": "Delivery confirmed successfully.",

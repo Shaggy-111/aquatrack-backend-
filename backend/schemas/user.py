@@ -1,6 +1,7 @@
 from pydantic import BaseModel, EmailStr, Field, model_validator
 from typing import Optional, List
 from enum import Enum
+from datetime import datetime
 
 
 
@@ -19,7 +20,6 @@ class RoleEnum(str, Enum):
     delivery_manager = "delivery_manager"
     employee = "employee"
 
-
 # ------------------------------------------------------------------
 # STORE OUT (must be BEFORE UserOut)
 # ------------------------------------------------------------------
@@ -31,6 +31,7 @@ class StoreOut(BaseModel):
     state: Optional[str] = None
     zip_code: Optional[str] = None
     channel: Optional[str] = None
+    is_active: bool = True
 
     class Config:
         from_attributes = True
@@ -201,3 +202,48 @@ class UserPatchStatus(BaseModel):
 
 class OrderPatch(BaseModel):
     delivery_person_id: int
+
+# ------------------------------------------------------------------
+# EMPLOYEE RBAC SCHEMAS
+# ------------------------------------------------------------------
+
+class EmployeeCreateRequest(BaseModel):
+    full_name: str
+    email: EmailStr
+    mobile_number: str
+
+    password: str
+    confirm_password: str
+
+    @model_validator(mode="after")
+    def validate_password(self):
+        if self.password != self.confirm_password:
+            raise ValueError("Passwords do not match")
+
+        self.email = self.email.lower().strip()
+        self.full_name = self.full_name.strip()
+        self.mobile_number = self.mobile_number.strip()
+
+        return self
+
+
+class EmployeeUpdateRequest(BaseModel):
+    full_name: Optional[str] = None
+    mobile_number: Optional[str] = None
+    email: Optional[EmailStr] = None
+
+
+class EmployeeStatusRequest(BaseModel):
+    status: str
+
+
+class EmployeeListItem(BaseModel):
+    id: int
+    full_name: str
+    email: EmailStr
+    mobile_number: Optional[str]
+    status: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

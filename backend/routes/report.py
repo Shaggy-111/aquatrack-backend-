@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Form
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 from sqlalchemy import func
 from typing import List
 from datetime import datetime, timedelta, date
@@ -9,6 +9,8 @@ import shutil
 import pandas as pd
 from io import BytesIO
 import calendar
+import logging
+import re
 from sqlalchemy import text
 
 
@@ -19,9 +21,16 @@ from ..models.order import Order, OrderStatusEnum
 from ..models.store import Store
 from ..schemas.report import ReportOut
 from ..utils.jwt import get_current_user
+from ..utils.permissions import filter_query_by_employee_stores, has_permission, require_permission
+from ..utils.store_status import require_active_store
 from ..models.partner_store import PartnerStore
+from .delivery_reports import (
+    aggregate_effective_delivered_by_ist_date,
+    ist_date_range_utc,
+)
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
+logger = logging.getLogger(__name__)
 
 # Ensure uploads directory exists for the reports
 UPLOADS_DIR = "uploads"
@@ -113,6 +122,15 @@ def get_all_reports(
     """
     Retrieves a list of all water quality reports.
     """
+    if current_user.role == RoleEnum.employee:
+        if not has_permission(current_user.id, "reports.view", db=db):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to view reports."
+            )
+
+        return []
+
     allowed_roles = [RoleEnum.superadmin, RoleEnum.partner, RoleEnum.channel_admin]
     
     if current_user.role not in allowed_roles:
@@ -140,10 +158,16 @@ async def export_monthly_pivot(
     except:
         raise HTTPException(status_code=400, detail="Invalid date format")
 
+    if current_user.role == RoleEnum.employee:
+        if not has_permission(current_user.id, "reports.export", db=db):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to export reports."
+            )
+
     query = db.query(Store).options(
         joinedload(Store.partner_associations).joinedload(PartnerStore.user),
-        joinedload(Store.orders)
-    )
+    ).filter(Store.is_active.is_(True))
 
     # ✅ Filters
     if state and state not in ["state", "All States", ""]:
@@ -157,10 +181,34 @@ async def export_monthly_pivot(
     elif channel and channel not in ["All Entities", ""]:
         query = query.filter(func.upper(Store.channel) == channel.upper())
 
+    if current_user.role == RoleEnum.employee:
+        query = filter_query_by_employee_stores(query, current_user)
+
     stores = query.all()
 
     if not stores:
         raise HTTPException(status_code=404, detail="No stores found")
+
+    start_utc, end_utc = ist_date_range_utc(start_dt.date(), end_dt.date())
+    included_statuses = [
+        OrderStatusEnum.delivered_confirmed,
+        OrderStatusEnum.delivered_pending_confirmation,
+    ]
+    report_orders = db.query(Order).filter(
+        Order.store_id.in_([store.id for store in stores]),
+        Order.order_date >= start_utc,
+        Order.order_date < end_utc,
+        Order.status.in_(included_statuses),
+    ).all()
+    orders_by_store = {}
+    for order in report_orders:
+        orders_by_store.setdefault(order.store_id, []).append(order)
+
+    store_channels = {
+        (store.channel or "").strip().upper()
+        for store in stores
+    }
+    include_project_code = store_channels != {"BLINKIT"}
 
     # 📅 Dates
     selected_days = []
@@ -205,27 +253,23 @@ async def export_monthly_pivot(
         # 👉 Date Map
         date_map = {day: 0 for day in selected_days}
 
-        for o in s.orders:
-            if not o.order_date:
-                continue
-
-            if o.status != OrderStatusEnum.delivered_confirmed:
-                continue
-
-            order_date = o.order_date.date()
-
-            if not (start_dt.date() <= order_date <= end_dt.date()):
-                continue
-
-            day_key = o.order_date.strftime(f'%{day_fmt}-%b')
-            date_map[day_key] += int(o.bottles_delivered or 0)
+        daily_totals = aggregate_effective_delivered_by_ist_date(
+            orders_by_store.get(s.id, [])
+        )
+        for order_date, quantity in daily_totals.items():
+            day_key = datetime.combine(order_date, datetime.min.time()).strftime(
+                f'%{day_fmt}-%b'
+            )
+            date_map[day_key] += quantity
 
         row = {
-            "Region": "NORTH",
-            "Entity": str(s.channel or "N/A").upper(),
+            "Region": str(s.region or "N/A"),
+            "Channel": str(s.channel or "N/A").upper(),
+            "Entity": str(s.entity or "N/A"),
             "STATE": str(s.state or "N/A"),
             "City": str(s.city or "N/A"),
             "Outlet ID": str(s.id),
+            "Project Code": str(s.project_code or "N/A"),
             "Outlet Name": str(s.store_name or "N/A"),
             "POC Name": str(getattr(manager, 'full_name', 'N/A')),
             "Contact No": str(getattr(manager, 'mobile_number', 'N/A')),
@@ -247,11 +291,14 @@ async def export_monthly_pivot(
     df = pd.DataFrame(data)
 
     info_cols = [
-        "Region", "Entity", "STATE", "City", "Outlet ID",
+        "Region","Channel", "Entity", "STATE", "City", "Outlet ID",
         "Outlet Name", "POC Name", "Contact No",
         "PRIMARY VENDOR NAME", "PRIMARY LICENSE NUMBER",
         "SECONDARY VENDOR NAME", "SECONDARY LICENSE NUMBER"
     ]
+
+    if include_project_code:
+        info_cols.insert(info_cols.index("Outlet Name"), "Project Code")
 
     final_cols = info_cols + ["Total Count"] + selected_days
     df = df[final_cols]
@@ -280,8 +327,13 @@ async def download_report(
     Accessible to Super Admins, Partners, and Channel Admins.
     """
     allowed_roles = [RoleEnum.superadmin, RoleEnum.partner, RoleEnum.channel_admin]
-    
-    if current_user.role not in allowed_roles:
+
+    if current_user.role == RoleEnum.employee:
+        require_permission("reports.export")(
+            current_user=current_user,
+            db=db
+        )
+    elif current_user.role not in allowed_roles:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Unauthorized to download reports."
@@ -312,461 +364,323 @@ async def upload_manual_delivery(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Upload Excel in report format and:
-    1. Update existing orders as delivered
-    2. Create missing orders and mark delivered
-    3. Set filled and empty bottles equal to uploaded quantity
-    4. Handles Outlet ID formats like:
-       - 4580
-       - 4580.0
-       - " 4580 "
-       - "04580"
-    5. Allows maximum 50 UNIQUE stores only
-    """
-
-    # --------------------------------------------------
-    # Role Validation
-    # --------------------------------------------------
+    """Upload manual deliveries using in-memory lookups and batched queries."""
     if current_user.role != RoleEnum.superadmin:
         raise HTTPException(
             status_code=403,
             detail="Only Super Admin can upload manual delivery data."
         )
 
-    # --------------------------------------------------
-    # File Validation
-    # --------------------------------------------------
     if not file.filename.lower().endswith((".xlsx", ".xls")):
-        raise HTTPException(
-            status_code=400,
-            detail="Please upload a valid Excel file."
-        )
+        raise HTTPException(status_code=400, detail="Please upload a valid Excel file.")
 
-    # --------------------------------------------------
-    # Read Excel File
-    # --------------------------------------------------
     try:
         contents = await file.read()
         df = pd.read_excel(BytesIO(contents))
-
-        # Remove completely blank rows
-        df = df.dropna(how="all")
-
-        # Remove completely blank columns
-        df = df.dropna(axis=1, how="all")
-
-        # Clean column names
+        df = df.dropna(how="all").dropna(axis=1, how="all")
         df.columns = [str(col).strip() for col in df.columns]
-
-    except Exception as e:
+    except Exception as exc:
         raise HTTPException(
             status_code=400,
-            detail=f"Unable to read Excel file: {str(e)}"
+            detail=f"Unable to read Excel file: {str(exc)}"
         )
 
-    # --------------------------------------------------
-    # Validate Required Column
-    # --------------------------------------------------
     if "Outlet ID" not in df.columns:
-        raise HTTPException(
-            status_code=400,
-            detail="Excel must contain 'Outlet ID' column."
-        )
+        raise HTTPException(status_code=400, detail="Excel must contain 'Outlet ID' column.")
 
-    # --------------------------------------------------
-    # Static Columns to Ignore
-    # --------------------------------------------------
     ignore_columns = {
-        "Region",
-        "Entity",
-        "STATE",
-        "City",
-        "Outlet ID",
-        "Outlet Name",
-        "POC Name",
-        "Contact No",
-        "PRIMARY VENDOR NAME",
-        "PRIMARY LICENSE NUMBER",
-        "SECONDARY VENDOR NAME",
-        "SECONDARY LICENSE NUMBER",
-        "Total Count"
+        "Region", "Channel", "Entity", "STATE", "City", "Outlet ID", "Project Code",
+        "Outlet Name", "POC Name", "Contact No", "PRIMARY VENDOR NAME",
+        "PRIMARY LICENSE NUMBER", "SECONDARY VENDOR NAME",
+        "SECONDARY LICENSE NUMBER", "Total Count"
     }
-
-    # --------------------------------------------------
-    # Detect Date Columns
-    # --------------------------------------------------
+    date_column_pattern = re.compile(
+        r"^(?:0?[1-9]|[12]\d|3[01])-(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)$"
+    )
     date_columns = [
-        col for col in df.columns
+        col
+        for col in df.columns
         if str(col).strip() not in ignore_columns
+        and date_column_pattern.fullmatch(str(col).strip())
     ]
-
     if not date_columns:
-        raise HTTPException(
-            status_code=400,
-            detail="No date columns found in Excel."
-        )
+        raise HTTPException(status_code=400, detail="No date columns found in Excel.")
 
-    # --------------------------------------------------
-    # Count Unique Stores (ROBUST FIX)
-    # Counts only rows having at least one positive quantity
-    # --------------------------------------------------
     for col in date_columns:
         df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    valid_rows = df[
-        df[date_columns]
-        .fillna(0)
-        .gt(0)
-        .any(axis=1)
-    ].copy()
-
+    valid_rows = df[df[date_columns].fillna(0).gt(0).any(axis=1)].copy()
     if valid_rows.empty:
+        raise HTTPException(status_code=400, detail="No delivery quantities found in Excel.")
+
+    invalid_values = {"", "nan", "none", "null"}
+
+    def normalize_outlet_id(value):
+        """Return the trimmed ID and its leading-zero-insensitive form."""
+        if pd.isna(value):
+            return "", ""
+        value_text = str(value).strip()
+        if value_text.lower() in invalid_values:
+            return "", ""
+        numeric_match = re.fullmatch(r"([+-]?\d+)\.0+", value_text)
+        if numeric_match:
+            value_text = numeric_match.group(1)
+        if re.fullmatch(r"\+?\d+", value_text):
+            unsigned = value_text.lstrip("+")
+            normalized = unsigned.lstrip("0") or "0"
+        else:
+            normalized = value_text
+        return value_text, normalized
+
+    def normalize_outlet_name(value):
+        """Trim and collapse whitespace; callers casefold when appropriate."""
+        if pd.isna(value):
+            return ""
+        value_text = str(value).strip()
+        if value_text.lower() in invalid_values:
+            return ""
+        return " ".join(value_text.split())
+
+    unique_stores = list(dict.fromkeys(
+        normalized_id
+        for outlet_id, normalized_id in (
+            normalize_outlet_id(value) for value in valid_rows["Outlet ID"]
+        )
+        if outlet_id
+    ))
+    if len(unique_stores) > 700:
         raise HTTPException(
             status_code=400,
-            detail="No delivery quantities found in Excel."
+            detail=f"Maximum 700 stores allowed per upload. Found {len(unique_stores)} stores."
         )
 
-    cleaned_outlet_ids = (
-        valid_rows["Outlet ID"]
-        .fillna("")
-        .astype(str)
-        .str.replace(".0", "", regex=False)
-        .str.strip()
-    )
-
-    cleaned_outlet_ids = cleaned_outlet_ids[
-        (cleaned_outlet_ids != "") &
-        (~cleaned_outlet_ids.str.lower().isin(
-            ["nan", "none", "null"]
-        ))
-    ]
-
-    unique_stores = cleaned_outlet_ids.unique()
-
-    print("=" * 80)
-    print("VALID ROWS:", len(valid_rows))
-    print("UNIQUE STORES:", len(unique_stores))
-    print("STORE IDS:", unique_stores.tolist())
-    print("=" * 80)
-
-    if len(unique_stores) > 50:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Maximum 50 stores allowed per upload. "
-                f"Found {len(unique_stores)} stores."
-            )
-        )
-
-    # --------------------------------------------------
-    # Parse Date Column Names
-    # Example: "01-May"
-    # --------------------------------------------------
     def parse_day_column(column_name: str) -> date:
         try:
             column_name = str(column_name).strip()
-
             day_part, month_part = column_name.split("-")
-            day_num = int(day_part)
-
             month_map = {
-                "Jan": 1,
-                "Feb": 2,
-                "Mar": 3,
-                "Apr": 4,
-                "May": 5,
-                "Jun": 6,
-                "Jul": 7,
-                "Aug": 8,
-                "Sep": 9,
-                "Oct": 10,
-                "Nov": 11,
-                "Dec": 12
+                "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4,
+                "May": 5, "Jun": 6, "Jul": 7, "Aug": 8,
+                "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12
             }
-
-            month_num = month_map[month_part[:3].title()]
-            current_year = datetime.utcnow().year
-
-            return date(current_year, month_num, day_num)
-
+            return date(
+                datetime.utcnow().year,
+                month_map[month_part[:3].title()],
+                int(day_part),
+            )
         except Exception:
             raise HTTPException(
                 status_code=400,
                 detail=f"Invalid date column format: {column_name}"
             )
 
-    # --------------------------------------------------
-    # Counters
-    # --------------------------------------------------
+    # Validate all headers before any database work, as in the original flow.
+    parsed_dates = {col: parse_day_column(col) for col in date_columns}
+
+    # Stores, partner relationships, and assigned managers are loaded once.
+    all_stores = (
+        db.query(Store)
+        .options(selectinload(Store.partners), joinedload(Store.assigned_manager))
+        .all()
+    )
+
+    exact_ids = {}
+    trimmed_ids = {}
+    normalized_ids = {}
+    exact_names = {}
+    casefold_names = {}
+    normalized_names = {}
+    searchable_names = []
+
+    def add_first(lookup, key, store):
+        if key and key not in lookup:
+            lookup[key] = store
+
+    for store in all_stores:
+        raw_id = str(store.id)
+        trimmed_id, normalized_id = normalize_outlet_id(raw_id)
+        raw_name = str(store.store_name or "").strip()
+        normalized_name = normalize_outlet_name(store.store_name)
+        add_first(exact_ids, raw_id, store)
+        add_first(trimmed_ids, trimmed_id, store)
+        add_first(normalized_ids, normalized_id, store)
+        add_first(exact_names, raw_name, store)
+        add_first(casefold_names, raw_name.casefold(), store)
+        add_first(normalized_names, normalized_name.casefold(), store)
+        searchable_names.append((normalized_name.casefold(), store))
+
+    resolved_rows = []
+    matched_store_ids = set()
+    for row_index, row in valid_rows.iterrows():
+        raw_id_value = row.get("Outlet ID", "")
+        outlet_id, normalized_id = normalize_outlet_id(raw_id_value)
+        raw_name_value = row.get("Outlet Name", "")
+        raw_name = "" if pd.isna(raw_name_value) else str(raw_name_value).strip()
+        outlet_name = normalize_outlet_name(raw_name_value)
+
+        store = None
+        if outlet_id:
+            store = exact_ids.get(str(raw_id_value))
+            store = store or trimmed_ids.get(outlet_id)
+            store = store or normalized_ids.get(normalized_id)
+        if not store and raw_name:
+            store = exact_names.get(raw_name)
+            store = store or casefold_names.get(raw_name.casefold())
+        if not store and outlet_name:
+            store = normalized_names.get(outlet_name.casefold())
+        if not store and outlet_name:
+            needle = outlet_name.casefold()
+            store = next(
+                (candidate for name, candidate in searchable_names if needle in name),
+                None,
+            )
+
+        resolved_rows.append((row_index, row, outlet_id, outlet_name, store))
+        if store:
+            matched_store_ids.add(store.id)
+
+    # One order query replaces the previous query for every positive cell.
+    existing_orders = []
+    if matched_store_ids:
+        existing_orders = (
+            db.query(Order)
+            .filter(
+                Order.store_id.in_(matched_store_ids),
+                func.date(Order.order_date).in_(set(parsed_dates.values())),
+            )
+            .order_by(Order.id.asc())
+            .all()
+        )
+    orders_by_key = {
+        (order.store_id, order.order_date.date()): order
+        for order in existing_orders
+    }
+
     stores_processed = 0
+    processed_rows = 0
     orders_updated = 0
     orders_created = 0
     skipped = 0
     unknown_stores = []
+    failed_rows = []
+    duplicate_rows = 0
+    seen_keys = set()
 
-    # --------------------------------------------------
-    # Process Each Row
-    # --------------------------------------------------
-    for _, row in valid_rows.iterrows():
-
-        # ----------------------------------------------
-        # Normalize Outlet ID + Outlet Name
-        # ----------------------------------------------
-        outlet_raw = row.get("Outlet ID", "")
-        outlet_name = str(
-            row.get("Outlet Name", "")
-        ).strip()
-
-        # Skip if both missing
-        if pd.isna(outlet_raw) and not outlet_name:
-            continue
-
-        # Convert Outlet ID safely
-        try:
-            if pd.isna(outlet_raw):
-                outlet_id = ""
-            elif isinstance(outlet_raw, (int, float)):
-                outlet_id = str(int(outlet_raw))
-            else:
-                outlet_id = (
-                    str(outlet_raw)
-                    .replace(".0", "")
-                    .strip()
-                )
-        except Exception:
-            outlet_id = (
-                str(outlet_raw)
-                .replace(".0", "")
-                .strip()
-            )
-
-        # Normalize invalid strings
-        if outlet_id.lower() in ["nan", "none", "null"]:
-            outlet_id = ""
-
-        normalized_outlet_id = (
-            outlet_id.lstrip("0") or "0"
-        )
-
-        # ----------------------------------------------
-        # Store Lookup
-        # ----------------------------------------------
-        store = None
-
-        # 1. Exact match by Store ID
-        if outlet_id:
-            store = (
-                db.query(Store)
-                .filter(Store.id == outlet_id)
-                .first()
-            )
-
-        # 2. Trimmed match
-        if not store and outlet_id:
-            store = (
-                db.query(Store)
-                .filter(func.trim(Store.id) == outlet_id)
-                .first()
-            )
-
-        # 3. Leading-zero insensitive match
-        if not store and outlet_id:
-            all_stores = db.query(Store).all()
-
-            for candidate in all_stores:
-                candidate_id = str(candidate.id).strip()
-                candidate_normalized = (
-                    candidate_id.lstrip("0") or "0"
-                )
-
-                if candidate_normalized == normalized_outlet_id:
-                    store = candidate
-                    break
-
-        # 4. Exact Outlet Name match
-        if not store and outlet_name:
-            store = (
-                db.query(Store)
-                .filter(
-                    func.lower(
-                        func.trim(Store.store_name)
-                    ) == outlet_name.lower()
-                )
-                .first()
-            )
-
-        # 5. Partial Outlet Name match
-        if not store and outlet_name:
-            store = (
-                db.query(Store)
-                .filter(
-                    func.lower(Store.store_name).contains(
-                        outlet_name.lower()
-                    )
-                )
-                .first()
-            )
-
-        # ----------------------------------------------
-        # Store Not Found
-        # ----------------------------------------------
+    for row_index, row, outlet_id, outlet_name, store in resolved_rows:
         if not store:
-            print(
-                f"❌ Store not found | "
-                f"Outlet ID: {outlet_id} | "
-                f"Outlet Name: {outlet_name}"
-            )
-
-            unknown_stores.append({
-                "outlet_id": outlet_id,
-                "outlet_name": outlet_name
-            })
-
+            unknown = {"outlet_id": outlet_id, "outlet_name": outlet_name}
+            unknown_stores.append(unknown)
+            logger.warning("Manual delivery store not found: %s", unknown)
             skipped += 1
             continue
 
+        require_active_store(store)
         stores_processed += 1
-
-        # ----------------------------------------------
-        # Validate Partner and Manager
-        # ----------------------------------------------
-        partner = (
-            store.partners[0]
-            if store.partners
-            else None
-        )
-
+        partner = store.partners[0] if store.partners else None
         manager_id = store.assigned_manager_id
-
         if not partner or not manager_id:
-            print(
-                f"⚠️ Skipped {store.id}: "
-                f"Partner or Manager missing"
-            )
+            logger.warning("Skipped store %s: partner or manager missing", store.id)
             skipped += 1
             continue
 
-        # ----------------------------------------------
-        # Process Each Date Column
-        # ----------------------------------------------
-        for col in date_columns:
-            raw_value = row.get(col)
+        row_created = []
+        row_updated = 0
+        row_keys = []
+        try:
+            # A savepoint isolates database errors to this spreadsheet row.
+            with db.begin_nested():
+                for col in date_columns:
+                    raw_value = row.get(col)
+                    if pd.isna(raw_value):
+                        continue
+                    try:
+                        qty = int(float(raw_value))
+                    except Exception:
+                        continue
+                    if qty <= 0:
+                        continue
 
-            # Skip blank cells
-            if pd.isna(raw_value):
-                continue
+                    delivery_date = parsed_dates[col]
+                    key = (store.id, delivery_date)
+                    row_keys.append(key)
+                    existing_order = orders_by_key.get(key)
+                    if existing_order:
+                        existing_order.status = OrderStatusEnum.delivered_confirmed
+                        existing_order.order_details = str(qty)
+                        existing_order.total_amount = 0
+                        existing_order.bottles_delivered = qty
+                        existing_order.empty_bottles_collected = qty
+                        existing_order.confirmed_empty_bottles = qty
+                        existing_order.confirmed_bottles = qty
+                        existing_order.store_confirmed = True
+                        existing_order.delivered_by = "Excel Upload"
+                        existing_order.vehicle_info = "Manual Upload"
+                        existing_order.order_date = datetime.combine(
+                            delivery_date, datetime.min.time()
+                        )
+                        existing_order.updated_at = datetime.utcnow()
+                        row_updated += 1
+                    else:
+                        new_order = Order(
+                            partner_id=partner.id,
+                            store_id=store.id,
+                            assigned_to_manager_id=manager_id,
+                            order_details=str(qty),
+                            total_amount=0,
+                            status=OrderStatusEnum.delivered_confirmed,
+                            channel=store.channel,
+                            order_date=datetime.combine(delivery_date, datetime.min.time()),
+                            bottles_delivered=qty,
+                            empty_bottles_collected=qty,
+                            confirmed_empty_bottles=qty,
+                            confirmed_bottles=qty,
+                            store_confirmed=True,
+                            delivered_by="Excel Upload",
+                            vehicle_info="Manual Upload"
+                        )
+                        db.add(new_order)
+                        row_created.append((key, new_order))
 
-            # Convert quantity
-            try:
-                qty = int(float(raw_value))
-            except Exception:
-                continue
+            for key, new_order in row_created:
+                orders_by_key[key] = new_order
+            orders_created += len(row_created)
+            orders_updated += row_updated
+            duplicate_rows += sum(key in seen_keys for key in row_keys)
+            seen_keys.update(row_keys)
+            processed_rows += 1
+        except Exception as row_error:
+            failed = {
+                "row": int(row_index) + 2,
+                "outlet_id": outlet_id,
+                "outlet_name": outlet_name,
+                "error": str(row_error),
+            }
+            failed_rows.append(failed)
+            logger.exception("Manual delivery row failed: %s", failed)
+            skipped += 1
 
-            # Skip zero or negative
-            if qty <= 0:
-                continue
-
-            # Parse delivery date
-            delivery_date = parse_day_column(col)
-
-            # ------------------------------------------
-            # Find Existing Order
-            # ------------------------------------------
-            existing_order = (
-                db.query(Order)
-                .filter(
-                    Order.store_id == store.id,
-                    func.date(Order.order_date)
-                    == delivery_date
-                )
-                .order_by(Order.id.desc())
-                .first()
-            )
-
-            # ------------------------------------------
-            # Update Existing Order
-            # ------------------------------------------
-            if existing_order:
-                existing_order.status = (
-                    OrderStatusEnum.delivered_confirmed
-                )
-                existing_order.order_details = str(qty)
-                existing_order.total_amount = 0
-                existing_order.bottles_delivered = qty
-                existing_order.empty_bottles_collected = qty
-                existing_order.confirmed_empty_bottles = qty
-                existing_order.confirmed_bottles = qty
-                existing_order.store_confirmed = True
-                existing_order.delivered_by = "Excel Upload"
-                existing_order.vehicle_info = "Manual Upload"
-                existing_order.order_date = datetime.combine(
-                    delivery_date,
-                    datetime.min.time()
-                )
-                existing_order.updated_at = datetime.utcnow()
-
-                orders_updated += 1
-
-            # ------------------------------------------
-            # Create New Order
-            # ------------------------------------------
-            else:
-                try:
-                    new_order = Order(
-                        partner_id=partner.id,
-                        store_id=store.id,
-                        assigned_to_manager_id=manager_id,
-                        order_details=str(qty),
-                        total_amount=0,
-                        status=(
-                            OrderStatusEnum
-                            .delivered_confirmed
-                        ),
-                        channel=store.channel,
-                        order_date=datetime.combine(
-                            delivery_date,
-                            datetime.min.time()
-                        ),
-                        bottles_delivered=qty,
-                        empty_bottles_collected=qty,
-                        confirmed_empty_bottles=qty,
-                        confirmed_bottles=qty,
-                        store_confirmed=True,
-                        delivered_by="Excel Upload",
-                        vehicle_info="Manual Upload"
-                    )
-
-                    db.add(new_order)
-                    db.flush()
-
-                    orders_created += 1
-
-                except Exception as create_error:
-                    print(
-                        f"❌ Failed to create order "
-                        f"for Store {store.id}: "
-                        f"{str(create_error)}"
-                    )
-                    db.rollback()
-                    skipped += 1
-                    continue
-
-    # --------------------------------------------------
-    # Commit Database
-    # --------------------------------------------------
     try:
+        if matched_store_ids:
+            stores_before_commit = (
+                db.query(Store)
+                .filter(Store.id.in_(matched_store_ids))
+                .populate_existing()
+                .with_for_update()
+                .all()
+            )
+            for store in stores_before_commit:
+                require_active_store(store)
         db.commit()
-    except Exception as e:
+    except HTTPException:
         db.rollback()
-        raise HTTPException(
-            status_code=500,
-            detail=f"Database error: {str(e)}"
-        )
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Database error: {str(exc)}")
 
-    # --------------------------------------------------
-    # Response
-    # --------------------------------------------------
+    logger.info(
+        "Manual delivery completed: rows=%s processed=%s created=%s updated=%s skipped=%s",
+        len(valid_rows), processed_rows, orders_created, orders_updated, skipped,
+    )
     return {
         "success": True,
         "message": "Manual delivery upload completed successfully.",
@@ -774,7 +688,12 @@ async def upload_manual_delivery(
         "orders_updated": orders_updated,
         "orders_created": orders_created,
         "skipped": skipped,
+        "skipped_rows": skipped,
         "unknown_stores": unknown_stores,
         "date_columns_processed": date_columns,
-        "unique_stores_found": len(unique_stores)
+        "unique_stores_found": len(unique_stores),
+        "total_rows": len(df),
+        "processed_rows": processed_rows,
+        "failed_rows": failed_rows,
+        "duplicate_rows": duplicate_rows,
     }

@@ -1,67 +1,52 @@
-import os
 from sqlalchemy import create_engine
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 
-# -----------------------------
-# 🔥 LOAD ENV (important for local scripts)
-# -----------------------------
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except:
-    pass
+from backend.config import settings
 
-# -----------------------------
-# 🔥 GET DATABASE URL
-# -----------------------------
-SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = settings.DATABASE_URL
 
-# Fix postgres:// → postgresql://
-if SQLALCHEMY_DATABASE_URL and SQLALCHEMY_DATABASE_URL.startswith("postgres://"):
-    SQLALCHEMY_DATABASE_URL = SQLALCHEMY_DATABASE_URL.replace("postgres://", "postgresql://", 1)
+if not DATABASE_URL:
+    if settings.APP_ENV == "local":
+        print("⚠️ DATABASE_URL missing -> Using SQLite")
+        DATABASE_URL = "sqlite:///./backend/database/aqua_track.db"
+    else:
+        raise RuntimeError(
+            f"DATABASE_URL is required for {settings.APP_ENV}"
+        )
 
-# -----------------------------
-# ⚠️ SAFETY LOG (important debug)
-# -----------------------------
-if SQLALCHEMY_DATABASE_URL:
-    print(f"✅ Using DB: {SQLALCHEMY_DATABASE_URL.split('@')[-1]}")
-else:
-    print("⚠️ No DATABASE_URL found → Using SQLite")
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace(
+        "postgres://",
+        "postgresql://",
+        1,
+    )
 
-# -----------------------------
-# 🔥 FALLBACK (local only)
-# -----------------------------
-if not SQLALCHEMY_DATABASE_URL:
-    SQLALCHEMY_DATABASE_URL = "sqlite:///./backend/database/aqua_track.db"
+print(f"Using Environment : {settings.APP_ENV}")
+print(f"Using Database    : {DATABASE_URL.split('@')[-1]}")
 
-# -----------------------------
-# 🔧 CONNECTION CONFIG
-# -----------------------------
 connect_args = {}
 
-if SQLALCHEMY_DATABASE_URL.startswith("sqlite"):
-    connect_args = {"check_same_thread": False}
+if DATABASE_URL.startswith("sqlite"):
+    connect_args = {
+        "check_same_thread": False
+    }
 
-# -----------------------------
-# 🚀 ENGINE
-# -----------------------------
 engine = create_engine(
-    SQLALCHEMY_DATABASE_URL,
+    DATABASE_URL,
     connect_args=connect_args,
-    pool_pre_ping=True  # 🔥 avoid stale connections
+    pool_pre_ping=True,
 )
 
-# -----------------------------
-# SESSION
-# -----------------------------
-SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+SessionLocal = sessionmaker(
+    bind=engine,
+    autocommit=False,
+    autoflush=False,
+)
 
 Base = declarative_base()
 
-# -----------------------------
-# DEPENDENCY
-# -----------------------------
+
 def get_db():
     db: Session = SessionLocal()
     try:

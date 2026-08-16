@@ -8,6 +8,7 @@ from ..models.order import Order, OrderStatusEnum
 from ..schemas.user import UserOut
 from ..schemas.order import OrderOut
 from ..utils.jwt import get_current_user
+from datetime import datetime, timedelta
 
 router = APIRouter(prefix="/delivery-manager", tags=["Delivery Manager"])
 
@@ -31,11 +32,14 @@ def get_manager_profile(
 
 
 # ✅ Delivery Manager Assigned Orders
+
 @router.get("/me/orders", response_model=List[OrderOut])
 def get_manager_assigned_orders(
     db: Session = Depends(get_db),
     current_user: User = Depends(delivery_manager_required)
 ):
+    five_days_ago = datetime.utcnow() - timedelta(days=5)
+
     orders = (
         db.query(Order)
         .options(
@@ -43,12 +47,28 @@ def get_manager_assigned_orders(
             joinedload(Order.partner),
             joinedload(Order.delivery_person)
         )
-        .filter(Order.assigned_to_manager_id == current_user.id)
+        .filter(
+            Order.assigned_to_manager_id == current_user.id,
+
+            # Active orders only
+            Order.status.in_([
+                OrderStatusEnum.assigned_to_manager,
+                OrderStatusEnum.assigned,
+                OrderStatusEnum.in_transit
+            ]),
+
+            # Only last 5 days
+            Order.created_at >= five_days_ago
+        )
         .order_by(Order.created_at.desc())
+        .limit(200)
         .all()
     )
 
-    # ✅ Return [] instead of 404
+    print(
+        f"Manager {current_user.id} Orders Returned: {len(orders)}"
+    )
+
     return orders
 
 

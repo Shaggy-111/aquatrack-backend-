@@ -9,6 +9,7 @@ class StoreOutMinimal(BaseModel):
     id: str
     store_name: str
     channel: str # <--- KEY ADDITION: Expose the channel
+    is_active: bool
 
     class Config:
         from_attributes = True
