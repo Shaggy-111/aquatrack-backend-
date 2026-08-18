@@ -3,7 +3,23 @@ from typing import Dict, List
 
 from sqlalchemy.orm import Session
 
+from ..models.employee_permission import EmployeePermission
 from ..models.permission import Permission
+from ..models.user import RoleEnum, User
+
+
+CHANNEL_ADMIN_BASE_PERMISSION_KEYS = (
+    "dashboard.view",
+    "orders.view",
+    "unassigned_orders.view",
+    "store.view",
+    "partner_poc.view",
+    "complaints.view",
+    "reports.view",
+)
+BLINKIT_CHANNEL_ADMIN_PERMISSION_KEYS = (
+    "blinkit_reports.view",
+)
 
 
 FINALIZED_PERMISSION_MATRIX: List[Dict[str, object]] = [
@@ -378,8 +394,74 @@ def seed_default_permissions(db: Session) -> Dict[str, int]:
         db.add_all(new_permissions)
         db.commit()
 
+    channel_admin_assignments = assign_channel_admin_permissions(db)
+    if channel_admin_assignments:
+        db.commit()
+
     return {
         "created_count": len(new_permissions),
         "updated_count": updated_count,
         "skipped_count": len(permission_rows) - len(new_permissions),
+        "channel_admin_assignments_created": channel_admin_assignments,
     }
+
+
+def channel_admin_permission_keys(channel: object) -> tuple[str, ...]:
+    keys = list(CHANNEL_ADMIN_BASE_PERMISSION_KEYS)
+    if str(channel or "").strip().upper() == "BLINKIT":
+        keys.extend(BLINKIT_CHANNEL_ADMIN_PERMISSION_KEYS)
+    return tuple(keys)
+
+
+def assign_channel_admin_permissions(
+    db: Session,
+    channel_admins: List[User] | None = None,
+) -> int:
+    """Create the role/channel defaults using the existing assignment model."""
+    if channel_admins is None:
+        channel_admins = (
+            db.query(User)
+            .filter(
+                User.role == RoleEnum.channel_admin,
+                User.is_deleted.is_(False),
+            )
+            .all()
+        )
+    if not channel_admins:
+        return 0
+
+    requested_keys = {
+        key
+        for user in channel_admins
+        for key in channel_admin_permission_keys(user.channel)
+    }
+    permissions_by_key = {
+        permission.permission_key: permission
+        for permission in db.query(Permission)
+        .filter(
+            Permission.permission_key.in_(requested_keys),
+            Permission.is_active.is_(True),
+        )
+        .all()
+    }
+    user_ids = [user.id for user in channel_admins]
+    existing = {
+        (assignment.employee_id, assignment.permission_id)
+        for assignment in db.query(EmployeePermission)
+        .filter(EmployeePermission.employee_id.in_(user_ids))
+        .all()
+    }
+    assignments = []
+    for user in channel_admins:
+        for key in channel_admin_permission_keys(user.channel):
+            permission = permissions_by_key.get(key)
+            if permission and (user.id, permission.id) not in existing:
+                assignments.append(
+                    EmployeePermission(
+                        employee_id=user.id,
+                        permission_id=permission.id,
+                    )
+                )
+                existing.add((user.id, permission.id))
+    db.add_all(assignments)
+    return len(assignments)

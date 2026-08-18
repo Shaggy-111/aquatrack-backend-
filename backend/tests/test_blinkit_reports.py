@@ -374,7 +374,7 @@ class BlinkitReportTests(unittest.TestCase):
     def test_superadmin_and_other_role_authorization_unchanged(self):
         blinkit_reports._require_access(self.admin, "blinkit_reports.view", self.db)
         self.assertTrue(blinkit_reports._can_view_vendor_rate(self.admin, self.db))
-        for role in (RoleEnum.partner, RoleEnum.channel_admin, RoleEnum.delivery_manager):
+        for role in (RoleEnum.partner, RoleEnum.delivery_manager):
             with self.subTest(role=role), self.assertRaises(HTTPException):
                 blinkit_reports._require_access(SimpleNamespace(role=role), "blinkit_reports.view", self.db)
 

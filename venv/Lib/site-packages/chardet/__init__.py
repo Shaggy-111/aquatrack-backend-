@@ -15,7 +15,7 @@ from chardet._utils import (
 from chardet._version import __version__
 from chardet.detector import UniversalDetector
 from chardet.enums import EncodingEra, LanguageFilter
-from chardet.equivalences import apply_compat_names, apply_preferred_superset
+from chardet.output_names import apply_compat_names, apply_preferred_superset
 from chardet.pipeline import DetectionDict, DetectionResult
 from chardet.pipeline.orchestrator import run_pipeline
 from chardet.registry import _validate_encoding, normalize_encodings
@@ -56,8 +56,17 @@ def detect(  # noqa: PLR0913
     :param chunk_size: Deprecated -- accepted for backward compatibility but
         has no effect.
     :param max_bytes: Maximum number of bytes to examine from *byte_str*.
-    :param prefer_superset: If ``True``, remap ISO subset encodings to their
-        Windows/CP superset equivalents (e.g., ISO-8859-1 -> Windows-1252).
+    :param prefer_superset: If ``True``, remap subset encodings in the result
+        to their decode-safe Windows/CP superset equivalents (e.g.,
+        ISO-8859-1 -> Windows-1252, EUC-KR -> CP949).  Recommended when the
+        result will be used to decode: detection examines at most
+        *max_bytes* of input, and only the superset is guaranteed to decode
+        bytes beyond that window.  If ``False`` (default), the detected
+        encoding is reported under its own name --- note this only skips
+        the renaming step; it is not a promise of the *smallest* matching
+        encoding, since detection may natively choose a superset that fits
+        the data better.  The default will change to ``True`` in chardet
+        8.0; pass ``False`` explicitly if you depend on subset names.
     :param compat_names: If ``True`` (default), return encoding names
         compatible with chardet 5.x/6.x.  If ``False``, return raw Python
         codec names.
@@ -127,8 +136,11 @@ def detect_all(  # noqa: PLR0913
     :param chunk_size: Deprecated -- accepted for backward compatibility but
         has no effect.
     :param max_bytes: Maximum number of bytes to examine from *byte_str*.
-    :param prefer_superset: If ``True``, remap ISO subset encodings to their
-        Windows/CP superset equivalents.
+    :param prefer_superset: If ``True``, remap subset encodings in the
+        results to their decode-safe Windows/CP superset equivalents.
+        If ``False`` (default), skip the renaming --- not a promise of the
+        smallest matching encoding.  The default will change to ``True``
+        in chardet 8.0.  See :func:`detect` for details.
     :param compat_names: If ``True`` (default), return encoding names
         compatible with chardet 5.x/6.x.  If ``False``, return raw Python
         codec names.
@@ -158,6 +170,7 @@ def detect_all(  # noqa: PLR0913
         exclude_encodings=exclude,
         no_match_encoding=no_match,
         empty_input_encoding=empty,
+        full_ranking=True,
     )
     dicts = [r.to_dict() for r in results]
     if not ignore_threshold:

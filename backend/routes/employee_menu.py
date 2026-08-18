@@ -120,7 +120,7 @@ def get_my_permissions(
     if current_user.role == RoleEnum.superadmin:
         return _get_all_active_permission_keys(db)
 
-    if current_user.role == RoleEnum.employee:
+    if current_user.role in (RoleEnum.employee, RoleEnum.channel_admin):
         return get_employee_permissions(current_user.id, db=db)
 
     return []
@@ -133,7 +133,7 @@ def get_my_sidebar(
 ):
     if current_user.role == RoleEnum.superadmin:
         permission_keys = set(_get_all_active_permission_keys(db))
-    elif current_user.role == RoleEnum.employee:
+    elif current_user.role in (RoleEnum.employee, RoleEnum.channel_admin):
         permission_keys = set(get_employee_permissions(current_user.id, db=db))
     else:
         permission_keys = set()

@@ -8,7 +8,7 @@ if defined _OLD_CODEPAGE (
     "%SystemRoot%\System32\chcp.com" 65001 > nul
 )
 
-set "VIRTUAL_ENV=D:\aqua-track-main (3)\aqua-track-main\venv"
+set "VIRTUAL_ENV=C:\Projects\aquatrack-backend-\venv"
 
 if not defined PROMPT set PROMPT=$P$G
 

@@ -225,6 +225,10 @@ def create_channel_admin(
     )
 
     db.add(new_admin)
+    db.flush()
+
+    from ..utils.permission_seeder import assign_channel_admin_permissions
+    assign_channel_admin_permissions(db, [new_admin])
     db.commit()
     db.refresh(new_admin)
 
