@@ -2,6 +2,11 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
 import { API_BASE_URL } from './config'; 
+import { clearPermissionsCache } from './hooks/usePermissions';
+import BackendSidebarItems from './components/BackendSidebarItems';
+import { clearSidebarCache } from './hooks/useSidebar';
+import LogoutConfirmationDialog from './components/LogoutConfirmationDialog';
+
 
 // --- Configuration & Helpers ---
 const backendToUiStatus = (s) => {
@@ -36,6 +41,9 @@ const SidebarItem = ({ label, icon, name, active, onSelect }) => (
         key={name}
         style={{ ...styles.sidebarItem, ...(active ? styles.sidebarItemActive : {}) }}
         onClick={() => onSelect(name)}
+        onMouseEnter={(event) => { if (!active) event.currentTarget.style.backgroundColor = 'rgba(255,255,255,0.08)'; }}
+        onMouseLeave={(event) => { if (!active) event.currentTarget.style.backgroundColor = 'transparent'; }}
+        title={label}
     >
         <span style={styles.sidebarIcon}>{icon}</span>
         <span style={styles.sidebarText}>{label}</span>
@@ -49,10 +57,12 @@ const Sidebar = ({ currentTab, onSelectTab, managerArea, managerName }) => (
             <p style={styles.sidebarSubHeader}>Area: {managerArea}</p> 
         </div>
         <nav style={styles.sidebarNav}>
-            <SidebarItem label="Dashboard" icon="🏠" name="dashboard" active={currentTab === 'dashboard'} onSelect={onSelectTab} />
-            <SidebarItem label="Monitoring Orders" icon="🚨" name="unassigned" active={currentTab === 'unassigned'} onSelect={onSelectTab} />
-            <SidebarItem label="All Orders" icon="📦" name="allOrders" active={currentTab === 'allOrders'} onSelect={onSelectTab} />
-            <SidebarItem label="My Delivery Team" icon="🚚" name="myTeam" active={currentTab === 'myTeam'} onSelect={onSelectTab} />
+            <BackendSidebarItems
+                currentTab={currentTab}
+                onSelectTab={onSelectTab}
+                renderGroup={(group) => <p key={group} style={styles.sidebarGroup}>{group}</p>}
+                renderItem={({ key, ...item }) => <SidebarItem key={key} {...item} onSelect={onSelectTab} />}
+            />
         </nav>
     </aside>
 );
@@ -62,6 +72,7 @@ const Sidebar = ({ currentTab, onSelectTab, managerArea, managerName }) => (
 // ❌ Note: The manual AssignOrderModal component has been removed to enforce auto-routing/monitoring flow.
 
 const DeliveryManagerDashboard = () => {
+    const [logoutDialogOpen, setLogoutDialogOpen] = useState(false);
     const [loading, setLoading] = useState(true);
     const [currentTab, setCurrentTab] = useState('dashboard');
     const [managerArea, setManagerArea] = useState(localStorage.getItem('manager_area') || "Your Area"); 
@@ -88,6 +99,8 @@ const DeliveryManagerDashboard = () => {
     const handleLogout = () => {
         // Clear tokens and DM-specific data
         ['auth_token', 'userToken', 'user_role', 'manager_area', 'manager_name'].forEach(key => localStorage.removeItem(key));
+        clearPermissionsCache();
+        clearSidebarCache();
         alert('You have been logged out.');
         navigate('/login'); 
     };
@@ -412,7 +425,7 @@ const DeliveryManagerDashboard = () => {
             case 'myTeam':
                 return renderMyTeam();
             default:
-                return renderDashboard();
+                return <p style={styles.loadingText}>This module is not implemented yet.</p>;
         }
     };
 
@@ -429,8 +442,9 @@ const DeliveryManagerDashboard = () => {
             <main style={styles.mainPanel}>
                 <header style={styles.topHeader}>
                     <h1 style={styles.headerTitle}>{managerName}'s Delivery Portal ({managerArea})</h1>
-                    <button style={styles.logoutButton} onClick={handleLogout}>Logout</button>
+                    <button style={styles.logoutButton} onClick={() => setLogoutDialogOpen(true)}>Logout</button>
                 </header>
+                <LogoutConfirmationDialog open={logoutDialogOpen} onCancel={() => setLogoutDialogOpen(false)} onConfirm={handleLogout} />
                 <div style={styles.mainContentArea}>
                     {renderContent()}
                 </div>
@@ -444,15 +458,16 @@ const DeliveryManagerDashboard = () => {
 // --- Styles (Unchanged) ---
 const styles = {
     dashboardLayout: { display: 'flex', minHeight: '100vh', width: '100vw', backgroundColor: '#F4F6F8', fontFamily: "'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif" },
-    sidebar: { width: '240px', backgroundColor: '#3B2F5B', color: '#ECF0F1', padding: '20px 0', display: 'flex', flexDirection: 'column', boxShadow: '2px 0 10px rgba(0,0,0,0.1)', zIndex: 10, },
+    sidebar: { width: '240px', minWidth: '240px', maxWidth: '240px', flex: '0 0 240px', height: '100vh', backgroundColor: '#3B2F5B', color: '#ECF0F1', padding: '20px 0', display: 'flex', flexDirection: 'column', overflow: 'hidden', boxShadow: '2px 0 10px rgba(0,0,0,0.1)', zIndex: 10, },
     sidebarHeader: { padding: '0 20px 25px', borderBottom: '1px solid rgba(255,255,255,0.1)', marginBottom: '15px', },
     sidebarHeaderTitle: { fontSize: '20px', fontWeight: '800', color: '#FFFFFF', margin: 0, marginBottom: '5px' },
     sidebarSubHeader: { fontSize: '14px', fontWeight: '600', color: '#F59E0B', margin: 0 },
-    sidebarNav: { flexGrow: 1, padding: '0 10px', },
-    sidebarItem: { display: 'flex', alignItems: 'center', padding: '12px 15px', borderRadius: '6px', marginBottom: '6px', backgroundColor: 'transparent', border: 'none', width: '100%', textAlign: 'left', cursor: 'pointer', transition: 'background-color 0.2s ease, color 0.2s ease', fontSize: '15px', color: '#BDC3C7', },
+    sidebarNav: { flexGrow: 1, padding: '0 10px', overflowY: 'auto', minHeight: 0, },
+    sidebarGroup: { margin: '16px 15px 8px', color: '#A99CC7', fontSize: '11px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '0.08em' },
+    sidebarItem: { display: 'flex', alignItems: 'center', padding: '12px 15px', borderRadius: '6px', marginBottom: '6px', backgroundColor: 'transparent', border: 'none', width: '100%', boxSizing: 'border-box', minHeight: '44px', lineHeight: 1.25, textAlign: 'left', cursor: 'pointer', transition: 'background-color 0.2s ease, color 0.2s ease', fontSize: '15px', color: '#BDC3C7', },
     sidebarItemActive: { backgroundColor: '#F59E0B', color: '#FFFFFF', fontWeight: '700', },
-    sidebarIcon: { fontSize: '18px', marginRight: '12px', },
-    sidebarText: { color: 'inherit', },
+    sidebarIcon: { width: '20px', minWidth: '20px', fontSize: '18px', marginRight: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, },
+    sidebarText: { color: 'inherit', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', },
     mainPanel: { flexGrow: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' },
     topHeader: { backgroundColor: '#FFFFFF', padding: '15px 30px', boxShadow: '0 1px 4px rgba(0,0,0,0.08)', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #E0E0E0', flexShrink: 0 },
     headerTitle: { fontSize: '22px', fontWeight: '600', color: '#333', margin: 0 },

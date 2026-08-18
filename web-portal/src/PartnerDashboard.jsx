@@ -11,12 +11,13 @@ import { API_BASE_URL } from './config';
 import QrReader from "react-qr-reader-es6";
 
 import Reports from './pages/Reports';
-
-
-
-
-
+import usePermissions, { clearPermissionsCache } from './hooks/usePermissions';
+import { PERMISSIONS } from './permissions';
+import BackendSidebarItems from './components/BackendSidebarItems';
+import { clearSidebarCache } from './hooks/useSidebar';
 import Modal from "react-modal";
+import LogoutConfirmationDialog from './components/LogoutConfirmationDialog';
+
 
 
 
@@ -230,6 +231,12 @@ const SidebarItem = ({ label, icon, name, active, onSelect }) => (
 
         onClick={() => onSelect(name)}
 
+        onMouseEnter={(event) => { if (!active) event.currentTarget.style.backgroundColor = 'rgba(255,255,255,0.08)'; }}
+
+        onMouseLeave={(event) => { if (!active) event.currentTarget.style.backgroundColor = 'transparent'; }}
+
+        title={label}
+
     >
 
         <span style={styles.sidebarIcon}>{icon}</span>
@@ -253,20 +260,12 @@ const Sidebar = ({ currentTab, onSelectTab }) => (
         </div>
 
         <nav style={styles.sidebarNav}>
-
-            <SidebarItem label="Dashboard" icon="🏠" name="dashboard" active={currentTab === 'dashboard'} onSelect={onSelectTab} />
-
-            <SidebarItem label="My Orders" icon="📦" name="myOrders" active={currentTab === 'myOrders'} onSelect={onSelectTab} />
-
-            <SidebarItem label="Place Order" icon="🛒" name="placeOrder" active={currentTab === 'placeOrder'} onSelect={onSelectTab} />
-
-            <SidebarItem label="Complaints" icon="💬" name="complaints" active={currentTab === 'complaints'} onSelect={onSelectTab} />
-
-            <SidebarItem label="Empty Bottles" icon="♻️" name="emptyBottles" active={currentTab === 'emptyBottles'} onSelect={onSelectTab} />
-
-            <SidebarItem label="Test Reports" icon="📄" name="testReports" active={currentTab === 'testReports'} onSelect={onSelectTab} />
-
-            <SidebarItem label="Analytics" icon="📊" name="analytics" active={currentTab === 'analytics'} onSelect={onSelectTab} />
+            <BackendSidebarItems
+                currentTab={currentTab}
+                onSelectTab={onSelectTab}
+                renderGroup={(group) => <p key={group} style={styles.sidebarGroup}>{group}</p>}
+                renderItem={({ key, ...item }) => <SidebarItem key={key} {...item} onSelect={onSelectTab} />}
+            />
 
         </nav>
 
@@ -279,6 +278,8 @@ const Sidebar = ({ currentTab, onSelectTab }) => (
 // --- Main Component ---
 
 const PartnerDashboard = () => {
+    const [logoutDialogOpen, setLogoutDialogOpen] = useState(false);
+    const { hasPermission } = usePermissions();
 
     const [currentTab, setCurrentTab] = useState('dashboard');
 
@@ -1033,13 +1034,12 @@ const PartnerDashboard = () => {
 
     const handleLogout = () => {
 
-        if (window.confirm('Are you sure you want to log out?')) {
+        localStorage.removeItem('partner_token');
 
-            localStorage.removeItem('partner_token');
+            clearPermissionsCache();
+            clearSidebarCache();
 
-            navigate('/login');
-
-        }
+        navigate('/login');
 
     };
 
@@ -2592,7 +2592,7 @@ const renderPlaceOrder = () => (
 
                                             <td style={styles.tableCell}>
 
-                                                <button
+                                                {hasPermission(PERMISSIONS.REPORTS_DOWNLOAD) && <button
 
                                                     onClick={() => handleReportDownload(report.id)}
 
@@ -2614,7 +2614,7 @@ const renderPlaceOrder = () => (
 
                                                     <span>👁️</span> View PDF
 
-                                                </button>
+                                                </button>}
 
                                             </td>
 
@@ -2700,7 +2700,7 @@ const renderPlaceOrder = () => (
 
             default:
 
-                return <p style={styles.errorText}>Something went wrong!</p>;
+                return <p style={styles.errorText}>This module is not implemented yet.</p>;
 
         }
 
@@ -2726,10 +2726,11 @@ const renderPlaceOrder = () => (
                             📍 Store ID: {storeHeaderInfo.id || "N/A"}
                         </span>
                     </div>
-                    <button style={styles.headerLogoutButton} onClick={handleLogout}>
+                    <button style={styles.headerLogoutButton} onClick={() => setLogoutDialogOpen(true)}>
                         <span style={{ marginRight: '8px' }}>🚪</span>Logout
                     </button>
                 </header>
+                <LogoutConfirmationDialog open={logoutDialogOpen} onCancel={() => setLogoutDialogOpen(false)} onConfirm={handleLogout} />
 
 
 
@@ -2885,6 +2886,14 @@ const styles = {
 
         width: '240px',
 
+        minWidth: '240px',
+
+        maxWidth: '240px',
+
+        flex: '0 0 240px',
+
+        height: '100vh',
+
         backgroundColor: '#1A2A44',
 
         color: '#ECF0F1',
@@ -2898,6 +2907,8 @@ const styles = {
         boxShadow: '4px 0 10px rgba(0,0,0,0.15)',
 
         zIndex: 10,
+
+        overflow: 'hidden',
 
     },
 
@@ -2929,7 +2940,13 @@ const styles = {
 
         padding: '0 10px',
 
+        overflowY: 'auto',
+
+        minHeight: 0,
+
     },
+
+    sidebarGroup: { margin: '16px 15px 8px', color: '#7F8FA6', fontSize: '11px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '0.08em' },
 
     sidebarItem: {
 
@@ -2949,6 +2966,8 @@ const styles = {
 
         width: '100%',
 
+        boxSizing: 'border-box',
+
         textAlign: 'left',
 
         cursor: 'pointer',
@@ -2958,6 +2977,10 @@ const styles = {
         fontSize: '15px',
 
         color: '#BDC3C7',
+
+        minHeight: '44px',
+
+        lineHeight: 1.25,
 
         // Hover effect for sidebar items is handled by the default browser button focus/hover states
 
@@ -2985,11 +3008,31 @@ const styles = {
 
         marginRight: '12px',
 
+        width: '20px',
+
+        minWidth: '20px',
+
+        display: 'flex',
+
+        alignItems: 'center',
+
+        justifyContent: 'center',
+
+        flexShrink: 0,
+
     },
 
     sidebarText: {
 
         color: 'inherit',
+
+        minWidth: 0,
+
+        overflow: 'hidden',
+
+        textOverflow: 'ellipsis',
+
+        whiteSpace: 'nowrap',
 
     },
 

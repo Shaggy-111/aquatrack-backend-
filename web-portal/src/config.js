@@ -1,17 +1,8 @@
-// src/config.js
-
 const ENVIRONMENT = import.meta.env.MODE || "development";
+const DEFAULT_API_BASE_URL = ENVIRONMENT === "production"
+  ? "https://aquatrack-prod-final.fly.dev"
+  : "http://localhost:8000";
 
-// 🔥 Use env variable if available (BEST PRACTICE)
-const PROD_API = import.meta.env.VITE_API_BASE_URL;
-
-export const API_BASE_URL =
-  ENVIRONMENT === "production"
-    ? PROD_API || "https://aquatrack-prod-final.fly.dev"
-    : "http://localhost:8000";
-
+export const API_BASE_URL = String(import.meta.env.VITE_API_URL || DEFAULT_API_BASE_URL).replace(/\/+$/, "");
+export const VITE_BLINKIT_REPORT_PIN = import.meta.env.VITE_BLINKIT_REPORT_PIN || "";
 export const APP_ENV = ENVIRONMENT;
-
-// 🔍 Debug
-console.log(`🔧 Running in ${ENVIRONMENT} mode`);
-console.log(`🌐 API Base URL: ${API_BASE_URL}`);

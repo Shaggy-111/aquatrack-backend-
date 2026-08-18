@@ -1,364 +1,302 @@
-import React, { useEffect, useState, useMemo } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import axios from "axios";
+import * as XLSX from "xlsx";
 import { API_BASE_URL } from "../config";
+import usePermissions from "../hooks/usePermissions";
+import AccessDenied from "../components/AccessDenied";
+import { PERMISSIONS } from "../permissions";
+import "./Reports.css";
 
+const CHANNELS = ["BLINKIT", "ZEPTO", "IBM", "GENERAL", "CUSTOM"];
+const PAGE_SIZES = [10, 25, 50, 100];
+const MONTHLY_PIVOT_URL = `${API_BASE_URL}/reports/reports/monthly-pivot/export`;
 
-/* ---------------- KPI CARD ---------------- */
-const KpiCard = ({ label, value, bg, color, icon }) => (
-  <div style={{
-    padding: 20,
-    borderRadius: 12,
-    background: bg,
-    color,
-    minWidth: 220,
-    position: "relative",
-    boxShadow: "0 4px 12px rgba(0,0,0,0.05)",
-    flex: "1 1 240px",
-    border: `1px solid ${color}20`
-  }}>
-    <div style={{ fontSize: 13, fontWeight: "600", opacity: 0.8, textTransform: "uppercase" }}>{label}</div>
-    <div style={{ fontSize: 32, fontWeight: "800", marginTop: 8 }}>{value}</div>
-    <div style={{ position: "absolute", top: 15, right: 20, fontSize: 28, opacity: 0.6 }}>{icon}</div>
-  </div>
-);
+const normalizeKey = (value) => String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+
+const renderValue = (value) => {
+  if (value === null || value === undefined || value === "") return "";
+  if (["string", "number"].includes(typeof value)) return value;
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (value instanceof Date) return value.toLocaleDateString("en-GB");
+  if (Array.isArray(value)) return value.map(renderValue).join(", ");
+  if (typeof value === "object") {
+    const property = ["name", "label", "title", "code", "value", "id"]
+      .map((key) => value[key])
+      .find((item) => item !== null && item !== undefined && typeof item !== "object");
+    if (property !== undefined) return String(property);
+    try { return JSON.stringify(value); } catch { return ""; }
+  }
+  return String(value);
+};
+
+const findHeaderRow = (matrix) => {
+  const index = matrix.findIndex((row) => {
+    const keys = row.map(normalizeKey);
+    return keys.includes("region") && keys.includes("channel") &&
+      (keys.includes("outlet") || keys.includes("outletname"));
+  });
+  return index >= 0 ? index : 0;
+};
+
+const parseWorkbook = async (blob) => {
+  const bytes = await blob.arrayBuffer();
+  const workbook = XLSX.read(bytes, { type: "array", cellDates: false });
+  const sheetName = workbook.SheetNames[0];
+  if (!sheetName) return { headers: [], rows: [] };
+  const matrix = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
+    header: 1,
+    raw: false,
+    defval: "",
+    blankrows: false,
+  });
+  if (!matrix.length) return { headers: [], rows: [] };
+
+  const headerIndex = findHeaderRow(matrix);
+  const rawHeaders = matrix[headerIndex].map((value, index) => renderValue(value) || `Column ${index + 1}`);
+  const lastColumn = rawHeaders.reduce((last, header, index) => header ? index : last, -1);
+  const headers = rawHeaders.slice(0, lastColumn + 1);
+  const rows = matrix
+    .slice(headerIndex + 1)
+    .map((row) => headers.map((_, index) => renderValue(row[index])))
+    .filter((row) => row.some((value) => value !== ""));
+  return { headers, rows };
+};
 
 const Reports = () => {
-  const token = localStorage.getItem("auth_token") || localStorage.getItem("partner_token") || localStorage.getItem("userToken");
-  const userRole = localStorage.getItem("user_role") || "";
-  const userChannel = localStorage.getItem("channel_name") || localStorage.getItem("channel") || "";
-  
-  const isSuperadmin = userRole?.toLowerCase() === "superadmin";
+  const token =
+    localStorage.getItem("auth_token") ||
+    localStorage.getItem("partner_token") ||
+    localStorage.getItem("userToken");
+  const userChannel =
+    localStorage.getItem("channel_name") ||
+    localStorage.getItem("channel") ||
+    localStorage.getItem("channelName") ||
+    "";
+  const { hasPermission, permissionsLoading } = usePermissions();
+  const canViewReports = hasPermission(PERMISSIONS.REPORTS_VIEW);
+  const canExportReports = hasPermission(PERMISSIONS.REPORTS_EXPORT);
+  const canUploadReports = hasPermission(PERMISSIONS.REPORTS_UPLOAD);
+  const fixedChannel = !permissionsLoading && !canExportReports && userChannel
+    ? userChannel.toUpperCase()
+    : "";
 
+  const [filters, setFilters] = useState({
+    fromDate: "",
+    toDate: "",
+    channel: fixedChannel,
+    state: "",
+    city: "",
+  });
+  const [headers, setHeaders] = useState([]);
   const [rows, setRows] = useState([]);
-  const [dynamicDates, setDynamicDates] = useState([]);
-  const [totalBottlesKPI, setTotalBottlesKPI] = useState(0);
+  const [workbookBlob, setWorkbookBlob] = useState(null);
   const [loading, setLoading] = useState(false);
-  
-  const [fromDate, setFromDate] = useState("");
-  const [toDate, setToDate] = useState("");
-  const [state, setState] = useState("");
-  const [city, setCity] = useState("");
-  const [channel, setChannel] = useState(isSuperadmin ? "" : userChannel.toUpperCase());
-  // Manual Delivery Upload States
+  const [error, setError] = useState("");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
   const [manualFile, setManualFile] = useState(null);
   const [uploadingManual, setUploadingManual] = useState(false);
 
-  // Handle Channel lock for non-superadmins
   useEffect(() => {
-    if (!isSuperadmin && userChannel) {
-      setChannel(userChannel.toUpperCase());
+    if (fixedChannel) {
+      setFilters((current) => ({ ...current, channel: fixedChannel }));
     }
-  }, [isSuperadmin, userChannel]);
+  }, [fixedChannel]);
 
-
-  const handleManualDeliveryUpload = async () => {
-    // Step 1: Check if file is selected
-    if (!manualFile) {
-      alert("Please select an Excel file.");
-      return;
-    }
-
-    // Step 2: Confirmation popup
-    const confirmed = window.confirm(
-      "Are you sure you want to upload this Excel?\n\n" +
-      "This action will automatically mark orders as delivered and may create missing orders."
-    );
-
-    if (!confirmed) {
-      return;
-    }
-
-    // Step 3: 4-digit security PIN
-    const pin = window.prompt("Enter 4-digit security PIN to continue:");
-
-    if (pin !== "5518") {
-      alert("❌ Invalid security PIN. Upload cancelled.");
-      return;
-    }
-
-    // Step 4: Upload file
-    try {
-      setUploadingManual(true);
-
-      const formData = new FormData();
-      formData.append("file", manualFile);
-
-      const res = await axios.post(
-        `${API_BASE_URL}/reports/reports/upload-manual-delivery`,
-        formData,
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "multipart/form-data",
-          },
-        }
-      );
-
-      const data = res.data;
-
-      // Step 5: Success message
-      alert(
-        `✅ Upload Successful!\n\n` +
-        `Stores Processed: ${data.stores_processed}\n` +
-        `Orders Updated: ${data.orders_updated}\n` +
-        `Orders Created: ${data.orders_created}\n` +
-        `Skipped: ${data.skipped}`
-      );
-
-      // Step 6: Reset selected file
-      setManualFile(null);
-
-      // Optional: Clear file input visually
-      const fileInput = document.querySelector('input[type="file"]');
-      if (fileInput) {
-        fileInput.value = "";
-      }
-
-      // Step 7: Refresh reports
-      fetchOrderReports();
-
-    } catch (err) {
-      console.error("Upload failed:", err);
-
-      alert(
-        err?.response?.data?.detail ||
-        "Manual delivery upload failed."
-      );
-    } finally {
-      setUploadingManual(false);
-    }
+  const updateFilter = (name, value) => {
+    setFilters((current) => ({
+      ...current,
+      [name]: value,
+      ...(name === "state" ? { city: "" } : {}),
+    }));
+    setPage(1);
   };
-  // ✅ IMPROVED FETCH: Logic to show ALL data if no filters are applied
-  const fetchOrderReports = async () => {
-    setLoading(true);
-    try {
-      const params = {
-        from_date: fromDate || undefined,
-        to_date: toDate || undefined,
-        channel: channel || undefined,
-        state: state || undefined,
-        city: city || undefined,
-      };
 
-      const res = await axios.get(`${API_BASE_URL}/delivery-reports/orders`, {
-        params,
+  const generateReport = async (nextFilters = filters) => {
+    if (!nextFilters.fromDate || !nextFilters.toDate) {
+      setHeaders([]);
+      setRows([]);
+      setWorkbookBlob(null);
+      setError("Select both Date From and Date To to generate the daily report.");
+      return;
+    }
+    if (nextFilters.fromDate > nextFilters.toDate) {
+      setError("Date From cannot be after Date To.");
+      return;
+    }
+
+    try {
+      setLoading(true);
+      setError("");
+      const response = await axios.get(MONTHLY_PIVOT_URL, {
+        params: {
+          from_date: nextFilters.fromDate,
+          to_date: nextFilters.toDate,
+          state: nextFilters.state || undefined,
+          city: nextFilters.city || undefined,
+          channel: nextFilters.channel || undefined,
+        },
+        responseType: "blob",
         headers: { Authorization: `Bearer ${token}` },
       });
-
-      const apiRows = res.data?.rows || [];
-      const apiDates = res.data?.dates || [];
-
-      setRows(apiRows);
-      setDynamicDates(apiDates);
-      setTotalBottlesKPI(apiRows.reduce((sum, r) => sum + (r["Total Count"] || 0), 0));
-
-    } catch (err) {
-      console.error("❌ Fetch error:", err);
+      const blob = response.data instanceof Blob
+        ? response.data
+        : new Blob([response.data], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const parsed = await parseWorkbook(blob);
+      setHeaders(parsed.headers);
+      setRows(parsed.rows);
+      setWorkbookBlob(blob);
+      setPage(1);
+    } catch (requestError) {
+      console.error("Daily pivot report failed:", requestError);
+      setHeaders([]);
       setRows([]);
-      setDynamicDates([]);
+      setWorkbookBlob(null);
+      setError("Unable to generate the daily matrix report.");
     } finally {
       setLoading(false);
     }
   };
 
-  // ✅ AUTO-FETCH ALL DATA ON LOAD
   useEffect(() => {
-    fetchOrderReports();
-  }, [channel]);
+    if (permissionsLoading || !canViewReports || !filters.fromDate || !filters.toDate) return undefined;
+    const timer = window.setTimeout(() => generateReport(filters), 350);
+    return () => window.clearTimeout(timer);
+    // Every report filter regenerates the legacy workbook and its date columns.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filters.fromDate, filters.toDate, filters.channel, filters.state, filters.city, permissionsLoading, canViewReports]);
 
-  // ✅ DYNAMIC STATE DROPDOWN
-  const dbStates = useMemo(() => {
-    return [...new Set(rows.map(r => r["STATE"] || r["state"]))].filter(Boolean).sort();
-  }, [rows]);
+  const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
+  const safePage = Math.min(page, pageCount);
+  const visibleRows = useMemo(
+    () => rows.slice((safePage - 1) * pageSize, safePage * pageSize),
+    [rows, safePage, pageSize]
+  );
 
-  // ✅ DYNAMIC CITY DROPDOWN (Filters cities based on selected state)
-  const dbCities = useMemo(() => {
-    if (!state) return [];
-    return [...new Set(
-        rows
-        .filter(r => (r["STATE"] || r["state"]) === state)
-        .map(r => r["City"] || r["city"])
-    )].filter(Boolean).sort();
-  }, [state, rows]);
+  useEffect(() => {
+    if (page > pageCount) setPage(pageCount);
+  }, [page, pageCount]);
 
-  const downloadPivotExcel = async () => {
-    if (!fromDate || !toDate) return alert("Please select a date range first.");
-    try {
-        const res = await axios.get(`${API_BASE_URL}/reports/reports/monthly-pivot/export`, {
-            params: { from_date: fromDate, to_date: toDate, channel: channel || undefined, state: state || undefined, city: city || undefined },
-            responseType: "blob",
-            headers: { Authorization: `Bearer ${token}` },
-        });
-        const url = window.URL.createObjectURL(new Blob([res.data]));
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = `Distribution_Report_${fromDate}_to_${toDate}.xlsx`;
-        link.click();
-    } catch (err) { alert("Excel Export Failed"); }
+  const exportWorkbook = () => {
+    if (!workbookBlob) return;
+    const url = window.URL.createObjectURL(workbookBlob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `Distribution_${filters.fromDate}_to_${filters.toDate}.xlsx`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.URL.revokeObjectURL(url);
   };
 
   const resetFilters = () => {
-      setFromDate("");
-      setToDate("");
-      setState("");
-      setCity("");
-      if (isSuperadmin) setChannel("");
-      fetchOrderReports(); // Re-fetch all data on reset
+    setFilters({ fromDate: "", toDate: "", channel: fixedChannel, state: "", city: "" });
+    setHeaders([]);
+    setRows([]);
+    setWorkbookBlob(null);
+    setError("");
+    setPage(1);
   };
 
+  const handleManualDeliveryUpload = async () => {
+    if (!manualFile) return window.alert("Please select an Excel file.");
+    if (!window.confirm("Are you sure you want to upload this Excel?\n\nThis action will automatically mark orders as delivered and may create missing orders.")) return;
+    if (window.prompt("Enter 4-digit security PIN to continue:") !== "5518") {
+      return window.alert("Invalid security PIN. Upload cancelled.");
+    }
+    try {
+      setUploadingManual(true);
+      const formData = new FormData();
+      formData.append("file", manualFile);
+      const response = await axios.post(`${API_BASE_URL}/reports/reports/upload-manual-delivery`, formData, {
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "multipart/form-data" },
+      });
+      const data = response.data || {};
+      window.alert(`Upload Successful!\n\nStores Processed: ${renderValue(data.stores_processed)}\nOrders Updated: ${renderValue(data.orders_updated)}\nOrders Created: ${renderValue(data.orders_created)}\nSkipped: ${renderValue(data.skipped)}`);
+      setManualFile(null);
+      if (filters.fromDate && filters.toDate) await generateReport();
+    } catch (uploadError) {
+      console.error("Upload failed:", uploadError);
+      window.alert(renderValue(uploadError?.response?.data?.detail) || "Manual delivery upload failed.");
+    } finally {
+      setUploadingManual(false);
+    }
+  };
+
+  if (!permissionsLoading && !canViewReports) return <AccessDenied />;
+
   return (
-    <div style={{ padding: "20px", background: "#f8fafc", minHeight: "80vh" }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '25px' }}>
-        <h2 style={{ color: "#1e293b", fontWeight: "800", margin: 0 }}>📊 Store-Wise Distribution Analytics</h2>
-        <button 
-            onClick={downloadPivotExcel}
-            style={{ padding: "10px 20px", background: "#15803d", color: "#fff", border: "none", borderRadius: "8px", fontWeight: "bold", cursor: "pointer", display: "flex", alignItems: "center", gap: "8px" }}
-        >
-          📥 Download Excel
-        </button>
+    <div className="reports-page">
+      <div className="reports-heading">
+        <div>
+          <p className="reports-eyebrow">Delivery reports</p>
+          <h2>Daily Distribution Report</h2>
+          <p>One store per row with delivered bottle counts for every selected day.</p>
+        </div>
+        {canExportReports && (
+          <button className="reports-button reports-button-export" onClick={exportWorkbook} disabled={!workbookBlob || loading}>
+            Export Excel
+          </button>
+        )}
       </div>
 
-      <div
-      style={{
-        background: "#ffffff",
-        padding: "20px",
-        borderRadius: "12px",
-        marginBottom: "25px",
-        boxShadow: "0 2px 8px rgba(0,0,0,0.08)",
-      }}
-    >
-      <h3 style={{ marginTop: 0 }}>📤 Manual Delivery Upload</h3>
+      {canUploadReports && (
+        <section className="reports-card reports-upload-card">
+          <div><h3>Manual Delivery Upload</h3><p>Upload Excel to mark orders as delivered and create missing orders.</p></div>
+          <div className="reports-upload-actions">
+            <input type="file" accept=".xlsx,.xls" onChange={(event) => setManualFile(event.target.files?.[0] || null)} />
+            <button className="reports-button reports-button-primary" onClick={handleManualDeliveryUpload} disabled={!manualFile || uploadingManual}>
+              {uploadingManual ? "Uploading…" : "Upload Excel"}
+            </button>
+          </div>
+        </section>
+      )}
 
-      <p style={{ color: "#64748b", marginBottom: "15px" }}>
-        Upload Excel file to automatically mark orders as delivered.
-      </p>
-
-      <input
-        type="file"
-        accept=".xlsx,.xls"
-        onChange={(e) => setManualFile(e.target.files[0])}
-      />
-
-      <button
-        onClick={handleManualDeliveryUpload}
-        disabled={uploadingManual}
-        style={{
-          marginLeft: "12px",
-          padding: "10px 20px",
-          background: "#16a34a",
-          color: "#fff",
-          border: "none",
-          borderRadius: "8px",
-          cursor: "pointer",
-          fontWeight: "600",
-        }}
-      >
-        {uploadingManual ? "Uploading..." : "Upload Excel"}
-      </button>
-    </div>
-
-
-      <div style={{ display: "flex", gap: "10px", flexWrap: "wrap", marginBottom: "25px", background: "#fff", padding: "15px", borderRadius: "10px", boxShadow: "0 1px 3px rgba(0,0,0,0.1)" }}>
-        <div style={inputGroup}>
-            <label style={labelStyle}>From</label>
-            <input type="date" value={fromDate} onChange={(e) => setFromDate(e.target.value)} style={inputStyle} />
+      <section className="reports-card reports-filters">
+        <div className="reports-section-title">
+          <div><h3>Report Filters</h3><p>Changing the date range regenerates the daily columns.</p></div>
         </div>
-        <div style={inputGroup}>
-            <label style={labelStyle}>To</label>
-            <input type="date" value={toDate} onChange={(e) => setToDate(e.target.value)} style={inputStyle} />
-        </div>
-
-        <div style={inputGroup}>
-            <label style={labelStyle}>Channel / Entity</label>
-            {isSuperadmin ? (
-                <select value={channel} onChange={(e) => setChannel(e.target.value)} style={inputStyle}>
-                    <option value="">All Channels</option>
-                    <option value="BLINKIT">Blinkit</option>
-                    <option value="ZEPTO">Zepto</option>
-                    <option value="IBM">IBM</option>
-                    <option value="GENERAL">General</option>
-                    <option value="CUSTOM">Custom</option>
-                </select>
-            ) : (
-                <input type="text" value={channel} readOnly style={{ ...inputStyle, background: "#f1f5f9" }} />
-            )}
-        </div>
-
-        <div style={inputGroup}>
-            <label style={labelStyle}>State</label>
-            <select value={state} onChange={(e) => { setState(e.target.value); setCity(""); }} style={inputStyle}>
-                <option value="">All States</option>
-                {dbStates.map(s => <option key={s} value={s}>{s}</option>)}
+        <div className="reports-filter-grid reports-filter-grid-pivot">
+          <Field label="Date From"><input type="date" value={filters.fromDate} onChange={(event) => updateFilter("fromDate", event.target.value)} /></Field>
+          <Field label="Date To"><input type="date" value={filters.toDate} onChange={(event) => updateFilter("toDate", event.target.value)} /></Field>
+          <Field label="Channel">
+            <select value={filters.channel} onChange={(event) => updateFilter("channel", event.target.value)} disabled={Boolean(fixedChannel)}>
+              <option value="">All Channels</option>
+              {CHANNELS.map((channel) => <option key={channel} value={channel}>{channel}</option>)}
             </select>
+          </Field>
+          <Field label="State"><input value={filters.state} onChange={(event) => updateFilter("state", event.target.value)} placeholder="All States" /></Field>
+          <Field label="City"><input value={filters.city} onChange={(event) => updateFilter("city", event.target.value)} placeholder="All Cities" /></Field>
+          <div className="reports-filter-actions">
+            <button className="reports-button reports-button-primary" onClick={() => generateReport()} disabled={loading || !filters.fromDate || !filters.toDate}>{loading ? "Generating…" : "Generate Report"}</button>
+            <button className="reports-button reports-button-secondary" onClick={resetFilters} disabled={loading}>Reset</button>
+          </div>
         </div>
-        <div style={inputGroup}>
-            <label style={labelStyle}>City</label>
-            <select value={city} onChange={(e) => setCity(e.target.value)} disabled={!state} style={inputStyle}>
-                <option value="">All Cities</option>
-                {dbCities.map(c => <option key={c} value={c}>{c}</option>)}
-            </select>
-        </div>
-        <div style={{ display: "flex", gap: "8px", marginTop: "22px" }}>
-            <button onClick={fetchOrderReports} style={{ padding: "0 25px", height: "40px", background: "#2563eb", color: "#fff", border: "none", borderRadius: "6px", fontWeight: "600", cursor: "pointer" }}>Apply Filters</button>
-            <button onClick={resetFilters} style={{ padding: "0 15px", height: "40px", background: "#64748b", color: "#fff", border: "none", borderRadius: "6px", fontWeight: "600", cursor: "pointer" }}>Reset</button>
-        </div>
-      </div>
+        {error && <div className="reports-error" role="alert">{error}</div>}
+      </section>
 
-      <div style={{ display: "flex", gap: "20px", marginBottom: "30px" }}>
-        <KpiCard label="Total Bottles (Confirmed)" value={totalBottlesKPI} bg="#dcfce7" color="#166534" icon="🥤" />
-        <KpiCard label="Total Outlets Served" value={rows.length} bg="#dbeafe" color="#1e40af" icon="🏬" />
-      </div>
-
-      <div style={{ background: "#fff", borderRadius: "12px", overflow: "hidden", boxShadow: "0 4px 6px -1px rgba(0,0,0,0.1)" }}>
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
-            <thead style={{ background: "#0f172a", color: "#fff" }}>
-              <tr>
-                <th style={thStyle}>Entity</th>
-                <th style={thStyle}>City</th>
-                <th style={thStyle}>Outlet ID</th>
-                <th style={thStyle}>Outlet Name</th>
-                <th style={thStyle}>POC Name</th>
-                <th style={{ ...thStyle, background: "#1e293b", textAlign: "center", position: "sticky", left: 0 }}>TOTAL</th>
-                {dynamicDates.map(d => <th key={d} style={{ ...thStyle, textAlign: "center", minWidth: "70px" }}>{d}</th>)}
-              </tr>
-            </thead>
+      <section className="reports-card reports-table-card">
+        <div className="reports-table-toolbar">
+          <div><h3>Daily Delivery Matrix</h3><p>{loading ? "Loading report…" : `${rows.length.toLocaleString("en-IN")} stores`}</p></div>
+          <label>Rows per page <select value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1); }}>{PAGE_SIZES.map((size) => <option key={size} value={size}>{size}</option>)}</select></label>
+        </div>
+        <div className="reports-table-wrap">
+          <table className="reports-table reports-pivot-table">
+            <thead><tr><th className="reports-row-number">#</th>{headers.map((header, index) => <th key={`${String(header)}-${index}`}>{renderValue(header)}</th>)}</tr></thead>
             <tbody>
-              {loading ? (
-                <tr><td colSpan="100" style={{ padding: "40px", textAlign: "center" }}>Fetching Distribution Data...</td></tr>
-              ) : rows.length === 0 ? (
-                <tr><td colSpan="100" style={{ padding: "40px", textAlign: "center", color: "#64748b" }}>No data found for the current selection.</td></tr>
-              ) : (
-                    rows.map((row, idx) => (
-                      <tr key={idx} style={{ borderBottom: "1px solid #f1f5f9", background: idx % 2 ? "#f8fafc" : "#fff" }}>
-                        <td style={tdStyle}>{row["Entity"]}</td>
-                        <td style={tdStyle}>{row["City"]}</td>
-                        <td style={{ ...tdStyle, fontWeight: "bold" }}>{row["Outlet ID"]}</td>
-                        <td style={tdStyle}>{row["Outlet Name"]}</td>
-                        <td style={tdStyle}>{row["POC Name"]}</td>
-                        <td style={{ ...tdStyle, textAlign: "center", fontWeight: "bold", background: "#f0fdf4", color: "#166534" }}>
-                          {row["Total Count"]}
-                        </td>
-                        {dynamicDates.map(date => (
-                          <td key={date} style={{ ...tdStyle, textAlign: "center" }}>
-                            {row[date] || 0}
-                          </td>
-                        ))}
-                      </tr>
-                    ))
-              )}
+              {loading ? Array.from({ length: 8 }, (_, rowIndex) => <tr key={`skeleton-${rowIndex}`} className="reports-skeleton-row"><td><i /></td>{Array.from({ length: Math.max(headers.length, 8) }, (_, cellIndex) => <td key={`skeleton-${rowIndex}-${cellIndex}`}><i /></td>)}</tr>) : visibleRows.length ? visibleRows.map((row, rowIndex) => { const absoluteIndex = (safePage - 1) * pageSize + rowIndex; return <tr key={`matrix-row-${absoluteIndex}`}><td className="reports-row-number">{absoluteIndex + 1}</td>{headers.map((_, cellIndex) => <td key={`matrix-cell-${absoluteIndex}-${cellIndex}`} title={String(renderValue(row[cellIndex]))}>{renderValue(row[cellIndex])}</td>)}</tr>; }) : <tr><td className="reports-empty" colSpan={Math.max(headers.length + 1, 2)}><strong>No daily report generated</strong><span>Select a From and To date to load the original matrix report.</span></td></tr>}
             </tbody>
           </table>
         </div>
-      </div>
+        <div className="reports-pagination">
+          <span>Showing {rows.length ? (safePage - 1) * pageSize + 1 : 0}–{Math.min(safePage * pageSize, rows.length)} of {rows.length}</span>
+          <div><button onClick={() => setPage(1)} disabled={safePage === 1}>«</button><button onClick={() => setPage((value) => Math.max(1, value - 1))} disabled={safePage === 1}>‹</button><span>Page {safePage} of {pageCount}</span><button onClick={() => setPage((value) => Math.min(pageCount, value + 1))} disabled={safePage === pageCount}>›</button><button onClick={() => setPage(pageCount)} disabled={safePage === pageCount}>»</button></div>
+        </div>
+      </section>
     </div>
   );
 };
 
-const inputGroup = { display: "flex", flexDirection: "column", gap: "4px" };
-const labelStyle = { fontSize: "11px", fontWeight: "bold", color: "#64748b", textTransform: "uppercase" };
-const inputStyle = { padding: "8px", borderRadius: "6px", border: "1px solid #cbd5e1", minWidth: "140px", outline: "none" };
-const thStyle = { padding: "12px 15px", border: "1px solid #334155", whiteSpace: "nowrap", fontSize: "12px" };
-const tdStyle = { padding: "10px 15px", border: "1px solid #e2e8f0", whiteSpace: "nowrap" };
+const Field = ({ label, children }) => <label className="reports-field"><span>{label}</span>{children}</label>;
 
 export default Reports;

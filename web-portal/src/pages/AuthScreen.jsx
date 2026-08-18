@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { API_BASE_URL } from '../config'; 
+import { refreshPermissions } from '../hooks/usePermissions';
 
 // NOTE: Using your provided background image URL
 const LOGIN_BACKGROUND_IMAGE_URL =
@@ -11,6 +12,7 @@ const AuthScreen = () => {
   const navigate = useNavigate();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -31,7 +33,6 @@ const AuthScreen = () => {
     // 2. Unified API Call
     const response = await axios.post(`${API_BASE_URL}/auth/login`, payload);
 
-    console.log("Backend Response Data:", response.data);
 
     // 3. Extract Role, Tokens, and Channel Info
     // ⭐ IMPORTANT: backend sends `channel_name` not `channel`
@@ -52,7 +53,9 @@ const AuthScreen = () => {
     localStorage.setItem("auth_token", finalToken);
     localStorage.setItem("userToken", finalToken);
     localStorage.setItem("partner_token", finalToken);
-    localStorage.setItem("user_role", user_role);
+    const normalizedRole = String(user_role || "").toLowerCase();
+    localStorage.setItem("user_role", normalizedRole);
+    refreshPermissions();
 
     // 5. STORE CHANNEL NAME PROPERLY
     const resolvedChannel =
@@ -60,12 +63,12 @@ const AuthScreen = () => {
       (channel && channel.toString()) ||
       "";
 
-    if (user_role === "channel_admin" && resolvedChannel) {
+    if (normalizedRole === "channel_admin" && resolvedChannel) {
       console.log("Saving Channel Name:", resolvedChannel);
       localStorage.setItem("channel_name", resolvedChannel.toUpperCase());
     }
 
-    if (user_role === "delivery_manager" && city) {
+    if (normalizedRole === "delivery_manager" && city) {
       console.log("Saving Manager Area:", city);
       localStorage.setItem("manager_area", city);
     }
@@ -73,16 +76,16 @@ const AuthScreen = () => {
     console.log("User Role:", user_role);
 
     // 6. Role Based Navigation
-    if (user_role === "superadmin") {
+    if (normalizedRole === "superadmin") {
       navigate("/dashboard/superadmin");
-    } else if (user_role === "partner") {
+    } else if (normalizedRole === "partner") {
       navigate("/dashboard/partner");
-    } else if (user_role === "channel_admin") {
+    } else if (normalizedRole === "channel_admin") {
       navigate("/dashboard/channeladmin");
-    } else if (user_role === "delivery_manager") {
+    } else if (normalizedRole === "delivery_manager") {
       navigate("/dashboard/deliverymanager");
-    } else if (user_role === "employee") {
-      navigate("/attendance");   // 🔥 ADDED
+    } else if (normalizedRole === "employee") {
+      navigate("/dashboard/employee");
     } else {
       alert(`Unknown role: ${user_role}. Please contact admin.`);
       localStorage.clear();
@@ -128,15 +131,31 @@ const AuthScreen = () => {
               required
               disabled={loading}
             />
-            <input
-              type="password"
-              placeholder="Password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              style={authStyles.input}
-              required
-              disabled={loading}
-            />
+            <div style={authStyles.passwordField}>
+              <input
+                type={showPassword ? "text" : "password"}
+                name="password"
+                autoComplete="current-password"
+                placeholder="Password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                style={{ ...authStyles.input, paddingRight: '50px' }}
+                required
+                disabled={loading}
+              />
+              <button
+                type="button"
+                style={authStyles.passwordToggle}
+                onClick={() => setShowPassword((visible) => !visible)}
+                aria-label={showPassword ? "Hide password" : "Show password"}
+                aria-pressed={showPassword}
+                disabled={loading}
+              >
+                <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  {showPassword ? <><path d="m3 3 18 18" /><path d="M10.6 10.6a2 2 0 0 0 2.8 2.8" /><path d="M9.9 4.2A10.4 10.4 0 0 1 12 4c5.5 0 9 8 9 8a16 16 0 0 1-2.1 3.2M6.6 6.6C4.4 8.1 3 12 3 12s3.5 8 9 8a9.8 9.8 0 0 0 4.1-.9" /></> : <><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" /><circle cx="12" cy="12" r="3" /></>}
+                </svg>
+              </button>
+            </div>
             <div style={authStyles.optionsRow}>
               <label style={authStyles.checkboxLabel}>
                 <input type="checkbox" style={authStyles.checkbox} /> Remember me
@@ -229,6 +248,8 @@ const authStyles = {
     boxSizing: 'border-box',
     transition: 'border-color 0.2s ease, box-shadow 0.2s ease',
   },
+  passwordField: { position: 'relative', width: '100%' },
+  passwordToggle: { position: 'absolute', top: '50%', right: '14px', transform: 'translateY(-50%)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '6px', border: 'none', background: 'transparent', color: '#64748B', cursor: 'pointer' },
   optionsRow: {
     display: 'flex',
     justifyContent: 'space-between',

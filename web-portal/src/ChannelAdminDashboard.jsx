@@ -3,7 +3,15 @@ import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
 import { API_BASE_URL } from './config'; 
 import Reports from './pages/Reports';
+import BlinkitReports from './pages/BlinkitReports';
+import usePermissions, { clearPermissionsCache } from './hooks/usePermissions';
+import { PERMISSIONS } from './permissions';
+import BackendSidebarItems from './components/BackendSidebarItems';
+import AccessDenied from './components/AccessDenied';
+import { clearSidebarCache } from './hooks/useSidebar';
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
+import LogoutConfirmationDialog from './components/LogoutConfirmationDialog';
+
 
 // --- Configuration ---
 const BOTTLE_PRICE = 42; 
@@ -148,6 +156,7 @@ const SidebarItem = ({ label, icon, name, active, onSelect }) => (
         onMouseLeave={(e) => {
             if (!active) e.currentTarget.style.backgroundColor = 'transparent';
         }}
+        title={label}
     >
         <span style={styles.sidebarIcon}>{icon}</span>
         <span style={styles.sidebarText}>{label}</span>
@@ -194,13 +203,12 @@ const Sidebar = ({ currentTab, onSelectTab, channelName }) => (
 
         </div>
         <nav style={styles.sidebarNav}>
-            <SidebarItem label="Dashboard" icon="🏠" name="dashboard" active={currentTab === 'dashboard'} onSelect={onSelectTab} />
-            <SidebarItem label="Orders" icon="📦" name="orders" active={currentTab === 'orders'} onSelect={onSelectTab} />
-            <SidebarItem label="Unassigned Orders" icon="🚫" name="unassignedOrders" active={currentTab === 'unassignedOrders'} onSelect={onSelectTab} />
-            <SidebarItem label="Stores" icon="🏬" name="stores" active={currentTab === 'stores'} onSelect={onSelectTab} />
-            <SidebarItem label="My POC" icon="🤝" name="partners" active={currentTab === 'partners'} onSelect={onSelectTab} />
-            <SidebarItem label="Complaints" icon="💬" name="complaints" active={currentTab === 'complaints'} onSelect={onSelectTab} />           
-            <SidebarItem label="Reports" icon="📊" name="reports" active={currentTab === 'reports'} onSelect={onSelectTab} />
+            <BackendSidebarItems
+                currentTab={currentTab}
+                onSelectTab={onSelectTab}
+                renderGroup={(group) => <p key={group} style={styles.sidebarGroup}>{group}</p>}
+                renderItem={({ key, ...item }) => <SidebarItem key={key} {...item} onSelect={onSelectTab} />}
+            />
         </nav>
     </aside>
 );
@@ -298,6 +306,8 @@ const OrderCard = ({ order }) => {
 };
 
 const ChannelAdminDashboard = () => {
+    const [logoutDialogOpen, setLogoutDialogOpen] = useState(false);
+    const { hasPermission, permissionsLoading } = usePermissions();
     const [loading, setLoading] = useState(true);
     const [currentTab, setCurrentTab] = useState('dashboard');
     const [channelName, setChannelName] = useState(localStorage.getItem('channel_name') || "CHANNEL"); 
@@ -400,6 +410,8 @@ const ChannelAdminDashboard = () => {
     // --- Logout Handler ---
     const handleLogout = () => {
         ['auth_token', 'userToken', 'partner_token', 'user_role', 'channel_name'].forEach(key => localStorage.removeItem(key));
+        clearPermissionsCache();
+        clearSidebarCache();
         alert('You have been logged out.');
         navigate('/login'); 
     };
@@ -1443,13 +1455,13 @@ const renderOrders = () => {
 
                 <td style={styles.tableCell}>
                   {c.status === "pending" ? (
-                    <button
+                    hasPermission(PERMISSIONS.COMPLAINTS_RESOLVE) ? <button
                       style={{ ...styles.actionButton, backgroundColor: "#1565C0" }}
                       onClick={() => handleResolveClick(c)}
                       disabled={resolvingComplaint}
                     >
                       Resolve
-                    </button>
+                    </button> : null
                   ) : (
                     <span style={{ fontWeight: "600", color: "#4CAF50" }}>
                       ✅ Resolved
@@ -1547,7 +1559,7 @@ const renderOrders = () => {
                                                         </td>
                                                         <td style={styles.tableCell}>{formatReportMonth(r.report_date)}</td>
                                                         <td style={styles.tableCell}>
-                                                            <button
+                                                            {hasPermission(PERMISSIONS.REPORTS_DOWNLOAD) && <button
                                                                 style={{
                                                                     ...styles.actionButton,
                                                                     backgroundColor: '#1565C0',
@@ -1558,7 +1570,7 @@ const renderOrders = () => {
                                                                 onClick={() => handleReportDownload(r.id)}
                                                             >
                                                                 <span>👁️</span> View PDF
-                                                            </button>
+                                                            </button>}
                                                         </td>
                                                     </tr>
                                                 ))
@@ -1575,10 +1587,17 @@ const renderOrders = () => {
                         )}
                     </div>
                 );
+            case 'blinkitReports':
+                if (permissionsLoading) {
+                    return <p style={styles.loadingText}>Loading permissions...</p>;
+                }
+                return hasPermission(PERMISSIONS.BLINKIT_REPORTS_VIEW)
+                    ? <BlinkitReports />
+                    : <AccessDenied />;
             case 'unassignedOrders':
                 return renderUnassignedOrders();
             default:
-                return renderDashboard();
+                return <p style={styles.loadingText}>This module is not implemented yet.</p>;
         }
     };
 
@@ -1641,13 +1660,14 @@ const renderOrders = () => {
                                 borderRadius: '20px',
                                 boxShadow: '0 2px 6px rgba(0,0,0,0.1)'
                             }}
-                            onClick={handleLogout}
+                            onClick={() => setLogoutDialogOpen(true)}
                         >
                             🚪 Logout
                         </button>
 
                     </div>
                 </header>
+                <LogoutConfirmationDialog open={logoutDialogOpen} onCancel={() => setLogoutDialogOpen(false)} onConfirm={handleLogout} />
 
                 {/* CONTENT */}
                 <div style={styles.mainContentArea}>
@@ -1657,7 +1677,7 @@ const renderOrders = () => {
             </main>
 
             {/* Global Complaint Modal */}
-            <ComplaintResolutionModal
+            {hasPermission(PERMISSIONS.COMPLAINTS_RESOLVE) && <ComplaintResolutionModal
                 isVisible={showResolveModal}
                 onClose={handleCloseModal}
                 onSubmit={handleComplaintResolveSubmit}
@@ -1665,7 +1685,7 @@ const renderOrders = () => {
                 solutionText={solutionText}
                 setSolutionText={setSolutionText}
                 isLoading={resolvingComplaint}
-            />
+            />}
         </div>
     );
 };
@@ -1678,8 +1698,15 @@ const styles = {
     // Sidebar
     sidebar: {
         width: '240px',
+        minWidth: '240px',
+        maxWidth: '240px',
+        flex: '0 0 240px',
+        height: '100vh',
         backgroundColor: '#ffffff',
-        borderRight: '1px solid #E5E7EB'
+        borderRight: '1px solid #E5E7EB',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden'
     },
     sidebarHeader: { padding: '0 20px 25px', borderBottom: '1px solid rgba(255,255,255,0.1)', marginBottom: '15px', },
     sidebarHeaderTitle: {
@@ -1687,7 +1714,8 @@ const styles = {
         fontWeight: '600',
         color: '#0F172A',
     },
-    sidebarNav: { flexGrow: 1, padding: '0 10px', },
+    sidebarNav: { flexGrow: 1, padding: '0 10px', overflowY: 'auto', minHeight: 0, },
+    sidebarGroup: { margin: '16px 14px 8px', color: '#9CA3AF', fontSize: '11px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '0.08em' },
     sidebarItem: {
     display: 'flex',
     alignItems: 'center',
@@ -1697,20 +1725,23 @@ const styles = {
     backgroundColor: 'transparent',
     border: 'none',
     width: '100%',
+    boxSizing: 'border-box',
     textAlign: 'left',
     cursor: 'pointer',
     transition: 'all 0.2s ease',
     fontSize: '14px',
     fontWeight: '500',
     color: '#6B7280',   // 🔥 softer gray (premium feel)
+    minHeight: '42px',
+    lineHeight: 1.25,
 },
    sidebarItemActive: {
     backgroundColor: '#EEF2FF',
     color: '#4F46E5',
     fontWeight: '600',
 },
-    sidebarIcon: { fontSize: '18px', marginRight: '12px', },
-    sidebarText: { color: 'inherit', },
+    sidebarIcon: { width: '20px', minWidth: '20px', fontSize: '18px', marginRight: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, },
+    sidebarText: { color: 'inherit', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', },
 
     // Header and Main Content
     mainPanel: { flexGrow: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' },

@@ -1,0 +1,328 @@
+.store-qr-page {
+  min-height: 100vh;
+  box-sizing: border-box;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 20px 14px 40px;
+  background:
+    radial-gradient(circle at top right, rgba(34, 197, 94, 0.14), transparent 34%),
+    linear-gradient(160deg, #f0fdf4 0%, #f8fafc 48%, #eff6ff 100%);
+  color: #0f172a;
+  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.store-qr-card {
+  width: 100%;
+  max-width: 560px;
+  box-sizing: border-box;
+  padding: 24px 18px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 22px 55px rgba(15, 23, 42, 0.12);
+}
+
+.store-qr-header h1,
+.store-qr-success h1,
+.store-qr-error h1,
+.store-qr-loading h1 {
+  margin: 4px 0 8px;
+  color: #0f172a;
+  font-size: clamp(25px, 7vw, 34px);
+  line-height: 1.12;
+}
+
+.store-qr-header > p:last-child,
+.store-qr-success-copy,
+.store-qr-error > p,
+.store-qr-loading > p {
+  margin: 0;
+  color: #64748b;
+  line-height: 1.55;
+}
+
+.store-qr-eyebrow {
+  margin: 0;
+  color: #15803d;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.store-qr-store {
+  display: grid;
+  gap: 10px;
+  margin: 22px 0;
+}
+
+.store-qr-store > div,
+.store-qr-summary > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 13px 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.store-qr-store span,
+.store-qr-summary dt {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.store-qr-store strong,
+.store-qr-summary dd {
+  margin: 0;
+  color: #0f172a;
+  font-size: 14px;
+  font-weight: 750;
+  text-align: right;
+  word-break: break-word;
+}
+
+.store-qr-form {
+  display: grid;
+  gap: 18px;
+}
+
+.store-qr-form label {
+  display: grid;
+  gap: 8px;
+}
+
+.store-qr-form label > span {
+  color: #334155;
+  font-size: 14px;
+  font-weight: 750;
+}
+
+.store-qr-form em {
+  color: #dc2626;
+  font-style: normal;
+}
+
+.store-qr-form label small {
+  margin-left: 5px;
+  color: #94a3b8;
+  font-weight: 600;
+}
+
+.store-qr-form input,
+.store-qr-form textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 14px 15px;
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  outline: none;
+  background: #fff;
+  color: #0f172a;
+  font: inherit;
+  font-size: 16px;
+}
+
+.store-qr-form input:focus,
+.store-qr-form textarea:focus {
+  border-color: #16a34a;
+  box-shadow: 0 0 0 3px rgba(22, 163, 74, 0.13);
+}
+
+.store-qr-form [aria-invalid="true"] {
+  border-color: #dc2626;
+}
+
+.store-qr-validation {
+  margin: 0 !important;
+  color: #b91c1c !important;
+  font-size: 12px;
+}
+
+.store-qr-form textarea {
+  resize: vertical;
+}
+
+.store-qr-file {
+  padding: 11px !important;
+  background: #f8fafc !important;
+}
+
+.store-qr-file::file-selector-button {
+  margin-right: 10px;
+  padding: 9px 12px;
+  border: 0;
+  border-radius: 9px;
+  background: #e2e8f0;
+  color: #334155;
+  font-weight: 750;
+}
+
+.store-qr-file-name {
+  margin: 0 !important;
+  color: #475569 !important;
+  word-break: break-all;
+}
+
+.store-qr-photo {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 10px;
+  border: 1px solid #dbe5df;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.store-qr-photo img {
+  width: 92px;
+  height: 72px;
+  border-radius: 9px;
+  object-fit: cover;
+}
+
+.store-qr-photo div {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+}
+
+.store-qr-photo strong {
+  overflow: hidden;
+  color: #334155;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.store-qr-photo button,
+.store-qr-secondary {
+  min-height: 44px;
+  border: 1px solid #b9c9c1;
+  border-radius: 10px;
+  background: #fff;
+  color: #176b3a;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.store-qr-primary {
+  width: 100%;
+  min-height: 54px;
+  padding: 14px 18px;
+  border: 0;
+  border-radius: 13px;
+  background: linear-gradient(135deg, #16a34a, #15803d);
+  color: #fff;
+  font-size: 16px;
+  font-weight: 800;
+  cursor: pointer;
+  box-shadow: 0 10px 24px rgba(22, 163, 74, 0.25);
+}
+
+.store-qr-primary:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+.store-qr-inline-error {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 18px;
+  padding: 13px 14px;
+  border: 1px solid #fecaca;
+  border-radius: 12px;
+  background: #fef2f2;
+  color: #991b1b;
+  font-size: 13px;
+}
+
+.store-qr-success,
+.store-qr-error,
+.store-qr-loading,
+.store-qr-state {
+  margin-top: min(16vh, 120px);
+  text-align: center;
+}
+
+.store-qr-state .store-qr-primary,
+.store-qr-state .store-qr-secondary {
+  width: 100%;
+  margin-top: 20px;
+}
+
+.store-qr-success-icon,
+.store-qr-error-icon {
+  display: grid;
+  width: 68px;
+  height: 68px;
+  margin: 0 auto 18px;
+  place-items: center;
+  border-radius: 50%;
+  background: #dcfce7;
+  color: #15803d;
+  font-size: 36px;
+  font-weight: 900;
+}
+
+.store-qr-error-icon {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.store-qr-error .store-qr-primary {
+  margin-top: 22px;
+}
+
+.store-qr-summary {
+  display: grid;
+  gap: 9px;
+  margin: 24px 0 18px;
+}
+
+.store-qr-finish {
+  margin: 0;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.store-qr-spinner {
+  display: block;
+  width: 48px;
+  height: 48px;
+  margin: 0 auto 20px;
+  border: 4px solid #dcfce7;
+  border-top-color: #16a34a;
+  border-radius: 50%;
+  animation: store-qr-spin 0.85s linear infinite;
+}
+
+@keyframes store-qr-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (min-width: 600px) {
+  .store-qr-page {
+    padding-top: 44px;
+  }
+
+  .store-qr-card {
+    padding: 32px;
+  }
+}
+
+@media (max-width: 360px) {
+  .store-qr-page { padding: 10px 8px 24px; }
+  .store-qr-card { padding: 20px 14px; border-radius: 16px; }
+  .store-qr-store > div, .store-qr-summary > div { align-items: flex-start; flex-direction: column; gap: 5px; }
+  .store-qr-store strong, .store-qr-summary dd { text-align: left; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .store-qr-spinner {
+    animation: none;
+  }
+}
