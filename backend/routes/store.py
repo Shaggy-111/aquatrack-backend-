@@ -1,37 +1,47 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session, load_only
-from typing import List
+import os
+from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Form, Response
+from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session, load_only, joinedload
+from typing import List, Optional
+from datetime import datetime, timedelta
+from sqlalchemy import func, extract
 
 from ..database.db import get_db
 from ..models.employee_store_mapping import EmployeeStoreMapping
+from ..models.partner_store import PartnerStore
 from ..models.store import Store
 from ..models.user import User, RoleEnum
+from ..models.order import Order
 from ..schemas.store import (
     StoreCreate,
     StoreOut,
     StoreStatusUpdate,
     StoreUpdate,
-    StoreDeliverySummary
+    StoreDeliverySummary,
+    StoreBulkUploadSuccessResponse,
+    StoreBulkUploadErrorResponse,
 )
 from ..utils.jwt import get_current_user
+from ..utils.auth import hash_password
 from ..utils.permissions import (
     filter_query_by_employee_stores,
     get_employee_store_ids,
     require_permission
 )
 from backend.utils.auto_order import validate_store_for_auto_order
-from sqlalchemy.orm import joinedload
-
-from sqlalchemy import func, extract
-from datetime import datetime, timedelta
-
-from ..models.order import Order
-
-from ..schemas.store import (
-    StoreCreate,
-    StoreOut,
-    StoreUpdate,
-    StoreDeliverySummary
+from backend.utils.store_validation import (
+    validate_region,
+    validate_channel,
+    validate_entity,
+    validate_state,
+    validate_pincode,
+    validate_phone,
+    validate_latitude,
+    validate_longitude,
+    validate_is_active,
+    generate_bulk_upload_template,
+    parse_and_validate_stores_excel,
+    execute_bulk_store_insert,
 )
 
 
@@ -132,7 +142,7 @@ def create_store(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Create a new store (only Super Admin).
+    Create a new store (Admin or Super Admin).
     Allows manual Store ID entry from frontend.
     """
 
@@ -142,10 +152,27 @@ def create_store(
             current_user,
             db
         )
-    elif current_user.role != RoleEnum.superadmin:
+    elif current_user.role not in [RoleEnum.superadmin, RoleEnum.admin]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only a super admin can perform this action."
+            detail="Only an admin or super admin can perform this action."
+        )
+
+    # Validate master fields using canonical validators
+    try:
+        clean_channel = validate_channel(store.channel)
+        clean_region = validate_region(store.region)
+        clean_entity = validate_entity(store.entity)
+        clean_state = validate_state(store.state)
+        clean_pincode = validate_pincode(store.zip_code)
+        clean_lat = validate_latitude(store.latitude)
+        clean_lng = validate_longitude(store.longitude)
+        clean_phone = validate_phone(store.poc_phone, "POC_PHONE") if store.poc_phone else None
+        clean_active = validate_is_active(store.is_active)
+    except ValueError as ve:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(ve)
         )
 
     # 🔒 1. Prevent duplicate STORE ID
@@ -164,24 +191,51 @@ def create_store(
             detail="Store with this name already exists."
         )
 
-    # ✅ 3. Normalize channel
-    channel_to_save = store.channel.upper() if store.channel else "GENERAL"
-
-    # ⭐ 4. CREATE STORE WITH MANUAL ID ⭐
+    # ⭐ 3. CREATE STORE WITH MANUAL ID ⭐
     new_store = Store(
-        id=store.id,                     # ⭐ THIS IS THE KEY LINE
+        id=store.id,
         store_name=store.store_name,
         address=store.address,
         city=store.city,
-        state=store.state,
-        zip_code=store.zip_code,
-        latitude=store.latitude,
-        longitude=store.longitude,
-        channel=channel_to_save,
-        is_active=store.is_active,
+        state=clean_state,
+        region=clean_region,
+        entity=clean_entity,
+        project_code=store.project_code,
+        zip_code=clean_pincode,
+        latitude=clean_lat,
+        longitude=clean_lng,
+        channel=clean_channel,
+        is_active=clean_active,
     )
 
     db.add(new_store)
+    db.flush()
+
+    # Link POC / Partner if provided
+    if store.poc_name or clean_phone:
+        partner_name = store.poc_name or f"POC {new_store.id}"
+        dummy_email = f"poc_{new_store.id.lower()}@aquatrack.internal"
+        partner = db.query(User).filter(User.email == dummy_email).first()
+        if not partner:
+            partner = User(
+                full_name=partner_name,
+                email=dummy_email,
+                password=hash_password("AquaTrack@123"),
+                mobile_number=clean_phone,
+                role=RoleEnum.partner,
+                status="active",
+                parent_id=current_user.id,
+                channel=clean_channel,
+            )
+            db.add(partner)
+            db.flush()
+        else:
+            if store.poc_name:
+                partner.full_name = store.poc_name
+            if clean_phone:
+                partner.mobile_number = clean_phone
+        db.add(PartnerStore(user_id=partner.id, store_id=new_store.id))
+
     if current_user.role == RoleEnum.employee:
         db.add(
             EmployeeStoreMapping(
@@ -194,6 +248,147 @@ def create_store(
     db.refresh(new_store)
 
     return new_store
+
+
+# ✅ Download Official Bulk Upload Excel Template
+@router.get("/bulk-upload/template")
+def download_bulk_upload_template(
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Download official Excel template (.xlsx) for Store Bulk Upload.
+    Sheet 1 contains exact supported column headers and an example row.
+    Sheet 2 contains canonical allowed master values.
+    Requires Admin/Superadmin session.
+    """
+    if current_user.role not in [RoleEnum.superadmin, RoleEnum.admin]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only an admin or super admin can perform this action."
+        )
+
+    template_bytes = generate_bulk_upload_template()
+    return Response(
+        content=template_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": "attachment; filename=store_bulk_upload_template.xlsx"
+        }
+    )
+
+
+# ✅ Bulk Upload Stores through Excel
+@router.post(
+    "/bulk-upload",
+    response_model=StoreBulkUploadSuccessResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses={
+        400: {"model": StoreBulkUploadErrorResponse},
+        403: {"description": "Forbidden - invalid role or bulk upload password"},
+        500: {"description": "Server misconfiguration or database error"}
+    }
+)
+async def bulk_upload_stores(
+    file: UploadFile = File(...),
+    password: Optional[str] = Form(None),
+    pin: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Bulk create Stores from an uploaded Excel (.xlsx) file.
+    CREATE-ONLY: Does not update existing stores.
+    Atomic: All rows succeed or zero stores are created.
+    Requires Admin/Superadmin session + STORE_BULK_UPLOAD_PASSWORD.
+    """
+    # 1. Authorization check: Admin and Superadmin only
+    if current_user.role not in [RoleEnum.superadmin, RoleEnum.admin]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only an admin or super admin can perform this action."
+        )
+
+    # 2. Bulk upload password / PIN check
+    expected_password = os.getenv("STORE_BULK_UPLOAD_PASSWORD")
+    if not expected_password:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Bulk upload is disabled: STORE_BULK_UPLOAD_PASSWORD is not configured on the server."
+        )
+
+    submitted_password = password or pin
+    if not submitted_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Bulk upload password/PIN is required."
+        )
+
+    if submitted_password != expected_password:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid bulk upload password."
+        )
+
+    # 3. File extension and type check
+    filename = file.filename or ""
+    if not filename.lower().endswith(".xlsx"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid file type. Only .xlsx Excel files are supported."
+        )
+
+    # 4. File size limit (10 MB)
+    MAX_FILE_SIZE = 10 * 1024 * 1024
+    file_bytes = await file.read()
+    if len(file_bytes) > MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded file exceeds maximum allowed size (10 MB)."
+        )
+
+    # 5. Parse and strictly validate workbook
+    try:
+        valid_rows, errors, total_data_rows = parse_and_validate_stores_excel(file_bytes, db)
+    except ValueError as ve:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(ve)
+        )
+
+    # 6. If any validation errors exist, fail atomically with zero inserts
+    if errors:
+        invalid_row_set = {e["row"] for e in errors}
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={
+                "success": False,
+                "total_rows": total_data_rows,
+                "valid_rows": total_data_rows - len(invalid_row_set),
+                "invalid_rows": len(invalid_row_set),
+                "errors": errors,
+            }
+        )
+
+    # 7. Atomic database insertion
+    try:
+        created_ids = execute_bulk_store_insert(
+            valid_rows,
+            db,
+            created_by_user_id=current_user.id
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error during bulk creation: {str(e)}"
+        )
+
+    return {
+        "success": True,
+        "total_rows": total_data_rows,
+        "created_count": len(created_ids),
+        "skipped_count": 0,
+        "created_store_ids": created_ids,
+    }
 
 
 
@@ -219,10 +414,10 @@ def get_all_stores(
             current_user
         )
     else:
-        if current_user.role != RoleEnum.superadmin:
+        if current_user.role not in [RoleEnum.superadmin, RoleEnum.admin]:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only a super admin can perform this action."
+                detail="Only an admin or super admin can perform this action."
             )
         stores_query = db.query(Store)
 
@@ -302,7 +497,11 @@ def get_all_stores(
             ),
 
             "assigned_manager_id":
-            store.assigned_manager_id
+            store.assigned_manager_id,
+
+            # ✅ POC INFO
+            "poc_name": store.poc_name,
+            "poc_phone": store.poc_phone,
         })
 
     return response
@@ -343,26 +542,15 @@ def get_stores(
 # ✅ Update Store
 @router.patch("/update/{store_id}", response_model=StoreOut)
 def update_store(
-    store_id: str,   # 🔥 FIX: string hona chahiye (tera model string hai)
+    store_id: str,
     store_update: StoreUpdate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    if current_user.role == RoleEnum.employee:
-        employee_permission_required(
-            "store.edit",
-            current_user,
-            db
-        )
-        employee_store_access_required(
-            store_id,
-            current_user,
-            db
-        )
-    elif current_user.role != RoleEnum.superadmin:
+    if current_user.role not in [RoleEnum.superadmin, RoleEnum.admin]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only a super admin can perform this action."
+            detail="Only an admin or super admin can perform this action."
         )
 
     store_to_update = db.query(Store).filter(Store.id == store_id).first()
@@ -375,13 +563,211 @@ def update_store(
 
     update_data = store_update.model_dump(exclude_unset=True)
 
+    # 🔒 NON-NEGOTIABLE RULE: Store ID is immutable
+    if "id" in update_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Store ID is immutable and cannot be modified."
+        )
+
+    # Validate master fields using canonical validators
+    try:
+        if "region" in update_data:
+            update_data["region"] = validate_region(update_data["region"])
+        if "channel" in update_data:
+            update_data["channel"] = validate_channel(update_data["channel"])
+        if "entity" in update_data:
+            update_data["entity"] = validate_entity(update_data["entity"])
+        if "state" in update_data:
+            update_data["state"] = validate_state(update_data["state"])
+        if "zip_code" in update_data:
+            update_data["zip_code"] = validate_pincode(update_data["zip_code"])
+        if "latitude" in update_data:
+            update_data["latitude"] = validate_latitude(update_data["latitude"])
+        if "longitude" in update_data:
+            update_data["longitude"] = validate_longitude(update_data["longitude"])
+        if "is_active" in update_data:
+            update_data["is_active"] = validate_is_active(update_data["is_active"])
+        if "poc_phone" in update_data:
+            update_data["poc_phone"] = validate_phone(update_data["poc_phone"], "POC_PHONE")
+    except ValueError as ve:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(ve)
+        )
+
+    # 🔒 Check duplicate Store Name if being updated
+    if "store_name" in update_data and update_data["store_name"]:
+        existing = db.query(Store).filter(
+            Store.store_name == update_data["store_name"],
+            Store.id != store_id
+        ).first()
+        if existing:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Store with this name already exists."
+            )
+
+    # Handle assigned_manager_id relationship
+    if "assigned_manager_id" in update_data:
+        manager_id = update_data.pop("assigned_manager_id")
+        if manager_id is not None:
+            manager = db.query(User).filter(
+                User.id == manager_id,
+                User.role.in_([RoleEnum.delivery_manager, RoleEnum.vendor, RoleEnum.admin, RoleEnum.superadmin])
+            ).first()
+            if not manager:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"User with ID {manager_id} is not a valid Delivery Manager."
+                )
+            store_to_update.assigned_manager_id = manager.id
+        else:
+            store_to_update.assigned_manager_id = None
+
+    # Handle POC (poc_name, poc_phone) relationship
+    has_poc_update = ("poc_name" in update_data) or ("poc_phone" in update_data)
+    poc_name = update_data.pop("poc_name", None) if "poc_name" in update_data else None
+    poc_phone = update_data.pop("poc_phone", None) if "poc_phone" in update_data else None
+
+    if has_poc_update:
+        current_partner = store_to_update.partners[0] if (store_to_update.partners and len(store_to_update.partners) > 0) else None
+
+        target_name = poc_name if poc_name is not None else (current_partner.full_name if current_partner else f"POC {store_to_update.id}")
+        target_phone = poc_phone if poc_phone is not None else (current_partner.mobile_number if current_partner else None)
+
+        # 1. Non-partner phone collision check
+        if target_phone:
+            existing_user_with_phone = db.query(User).filter(User.mobile_number == target_phone).first()
+            if existing_user_with_phone and existing_user_with_phone.role != RoleEnum.partner:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"POC_PHONE '{target_phone}' already belongs to an existing user with role '{existing_user_with_phone.role.value}' and cannot be used as a POC phone."
+                )
+
+        # 2. Check if current partner is shared across other stores
+        is_shared = False
+        if current_partner:
+            partner_store_count = db.query(PartnerStore).filter(PartnerStore.user_id == current_partner.id).count()
+            if partner_store_count > 1:
+                is_shared = True
+
+        if is_shared:
+            # Shared partner: DO NOT mutate in place!
+            # Unlink current_partner from this store
+            db.query(PartnerStore).filter(
+                PartnerStore.user_id == current_partner.id,
+                PartnerStore.store_id == store_to_update.id
+            ).delete()
+            db.flush()
+
+            # Find existing partner user by target_phone or create a new one
+            new_partner = None
+            if target_phone:
+                new_partner = db.query(User).filter(
+                    User.mobile_number == target_phone,
+                    User.role == RoleEnum.partner
+                ).first()
+
+            if not new_partner:
+                dummy_email = f"poc_{store_to_update.id.lower()}@aquatrack.internal"
+                counter = 1
+                while db.query(User).filter(User.email == dummy_email).first():
+                    dummy_email = f"poc_{store_to_update.id.lower()}_{counter}@aquatrack.internal"
+                    counter += 1
+
+                new_partner = User(
+                    full_name=target_name,
+                    email=dummy_email,
+                    password=hash_password("AquaTrack@123"),
+                    mobile_number=target_phone,
+                    role=RoleEnum.partner,
+                    status="active",
+                    parent_id=current_user.id,
+                    channel=store_to_update.channel,
+                )
+                db.add(new_partner)
+                db.flush()
+            else:
+                if poc_name is not None and poc_name:
+                    new_partner.full_name = poc_name
+
+            db.add(PartnerStore(user_id=new_partner.id, store_id=store_to_update.id))
+            db.flush()
+            db.expire(store_to_update, ["partners"])
+
+        else:
+            # Partner is dedicated to this store (or store has no partner yet)
+            if current_partner:
+                if target_phone and current_partner.mobile_number != target_phone:
+                    existing_partner = db.query(User).filter(
+                        User.mobile_number == target_phone,
+                        User.role == RoleEnum.partner
+                    ).first()
+                    if existing_partner and existing_partner.id != current_partner.id:
+                        # Link store to existing partner
+                        db.query(PartnerStore).filter(
+                            PartnerStore.user_id == current_partner.id,
+                            PartnerStore.store_id == store_to_update.id
+                        ).delete()
+                        db.add(PartnerStore(user_id=existing_partner.id, store_id=store_to_update.id))
+                        if poc_name is not None and poc_name:
+                            existing_partner.full_name = poc_name
+                        db.delete(current_partner)
+                        db.flush()
+                        db.expire(store_to_update, ["partners"])
+                    else:
+                        if poc_name is not None:
+                            current_partner.full_name = target_name
+                        current_partner.mobile_number = target_phone
+                else:
+                    if poc_name is not None:
+                        current_partner.full_name = target_name
+                    if poc_phone is not None:
+                        current_partner.mobile_number = target_phone
+            else:
+                # No partner existed for this store
+                partner = None
+                if target_phone:
+                    partner = db.query(User).filter(
+                        User.mobile_number == target_phone,
+                        User.role == RoleEnum.partner
+                    ).first()
+
+                if not partner:
+                    dummy_email = f"poc_{store_to_update.id.lower()}@aquatrack.internal"
+                    counter = 1
+                    while db.query(User).filter(User.email == dummy_email).first():
+                        dummy_email = f"poc_{store_to_update.id.lower()}_{counter}@aquatrack.internal"
+                        counter += 1
+
+                    partner = User(
+                        full_name=target_name,
+                        email=dummy_email,
+                        password=hash_password("AquaTrack@123"),
+                        mobile_number=target_phone,
+                        role=RoleEnum.partner,
+                        status="active",
+                        parent_id=current_user.id,
+                        channel=store_to_update.channel,
+                    )
+                    db.add(partner)
+                    db.flush()
+                else:
+                    if poc_name is not None and poc_name:
+                        partner.full_name = poc_name
+
+                db.add(PartnerStore(user_id=partner.id, store_id=store_to_update.id))
+                db.flush()
+                db.expire(store_to_update, ["partners"])
+
     # 🔥 VALIDATION ONLY WHEN ENABLING AUTO ORDER
-    if update_data.get("auto_order_enabled") == True:
+    if update_data.get("auto_order_enabled") is True:
         valid, msg = validate_store_for_auto_order(store_to_update)
         if not valid:
             raise HTTPException(400, msg)
 
-    # 🔥 APPLY UPDATE
+    # 🔥 APPLY PARTIAL UPDATE (PATCH semantics)
     for key, value in update_data.items():
         setattr(store_to_update, key, value)
 

@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Any
 from datetime import datetime
 
 # -------------------------------------------------
@@ -20,6 +20,9 @@ class StoreBase(BaseModel):
     address: Optional[str] = None
     city: Optional[str] = None
     state: Optional[str] = None
+    region: Optional[str] = None
+    entity: Optional[str] = None
+    project_code: Optional[str] = None
     zip_code: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
@@ -30,6 +33,8 @@ class StoreBase(BaseModel):
 class StoreCreate(StoreBase):
     id: str                    # ✅ Store ID as STRING
     channel: str = "GENERAL"
+    poc_name: Optional[str] = None
+    poc_phone: Optional[str] = None
 
 
 # ---------- Assign Stores ----------
@@ -43,11 +48,17 @@ class StoreUpdate(BaseModel):
     address: Optional[str] = None
     city: Optional[str] = None
     state: Optional[str] = None
+    region: Optional[str] = None
+    entity: Optional[str] = None
     project_code: Optional[str] = None
     zip_code: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
-    channel: Optional[str] = None  # ✅ allow update channel also
+    channel: Optional[str] = None
+    is_active: Optional[bool] = None
+    assigned_manager_id: Optional[int] = None
+    poc_name: Optional[str] = None
+    poc_phone: Optional[str] = None
     auto_order_enabled: Optional[bool] = None
     order_frequency_days: Optional[int] = None
     monthly_cap: Optional[int] = None
@@ -55,11 +66,14 @@ class StoreUpdate(BaseModel):
 
 # ---------- Output Schema ----------
 class StoreOut(BaseModel):
-    id: str                    # ✅ FIXED (was int)
+    id: str
     store_name: str
     address: Optional[str] = None
     city: Optional[str] = None
     state: Optional[str] = None
+    region: Optional[str] = None
+    entity: Optional[str] = None
+    project_code: Optional[str] = None
     zip_code: Optional[str] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
@@ -74,6 +88,9 @@ class StoreOut(BaseModel):
     assigned_manager_id: Optional[int] = None
     assigned_manager: Optional[ManagerOut] = None
 
+    poc_name: Optional[str] = None
+    poc_phone: Optional[str] = None
+
     class Config:
         from_attributes = True
 
@@ -83,22 +100,40 @@ class StoreStatusUpdate(BaseModel):
 
 
 class StoreDeliverySummary(BaseModel):
-
     store_id: str
     store_name: str
-
     city: Optional[str] = None
     state: Optional[str] = None
-
     channel: Optional[str] = None
     is_active: bool = True
-
     month_delivered_bottles: int = 0
     week_delivered_bottles: int = 0
-
     total_orders: int = 0
-
     last_delivery_date: Optional[datetime] = None
 
     class Config:
         from_attributes = True
+
+
+# ---------- Bulk Upload Schemas ----------
+class StoreBulkUploadErrorItem(BaseModel):
+    row: int
+    column: str
+    value: Any
+    message: str
+
+
+class StoreBulkUploadErrorResponse(BaseModel):
+    success: bool = False
+    total_rows: int
+    valid_rows: int
+    invalid_rows: int
+    errors: List[StoreBulkUploadErrorItem]
+
+
+class StoreBulkUploadSuccessResponse(BaseModel):
+    success: bool = True
+    total_rows: int
+    created_count: int
+    skipped_count: int = 0
+    created_store_ids: List[str]

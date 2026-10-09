@@ -113,6 +113,21 @@ class Store(Base):
     )
 
     # -------------------------------------------------
+    # Virtual Properties (Partner / POC Resolution)
+    # -------------------------------------------------
+    @property
+    def poc_name(self):
+        if self.partners and len(self.partners) > 0:
+            return self.partners[0].full_name
+        return None
+
+    @property
+    def poc_phone(self):
+        if self.partners and len(self.partners) > 0:
+            return self.partners[0].mobile_number
+        return None
+
+    # -------------------------------------------------
     # String Representation
     # -------------------------------------------------
     def __repr__(self):
@@ -124,3 +139,4 @@ class Store(Base):
             f"assigned_manager_id={self.assigned_manager_id}"
             f")>"
         )
+
