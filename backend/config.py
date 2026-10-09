@@ -33,18 +33,9 @@ def _normalize_database_url(database_url: Optional[str]) -> Optional[str]:
 
     # Legacy PostgreSQL scheme used by some providers.
     if database_url.startswith("postgres://"):
-        database_url = database_url.replace(
+        return database_url.replace(
             "postgres://",
             "postgresql://",
-            1,
-        )
-
-    # Production currently ships psycopg2-binary, not psycopg v3.
-    # Normalize an explicit psycopg v3 SQLAlchemy URL to psycopg2.
-    if database_url.startswith("postgresql+psycopg://"):
-        database_url = database_url.replace(
-            "postgresql+psycopg://",
-            "postgresql+psycopg2://",
             1,
         )
 
