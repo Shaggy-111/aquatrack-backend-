@@ -12,9 +12,13 @@ VALID_APP_ENVS = {"local", "stage", "production"}
 
 def _get_app_env() -> str:
     app_env = os.getenv("APP_ENV", "local").strip().lower()
+
     if app_env not in VALID_APP_ENVS:
         valid_envs = ", ".join(sorted(VALID_APP_ENVS))
-        raise ValueError(f"Invalid APP_ENV '{app_env}'. Expected one of: {valid_envs}.")
+        raise ValueError(
+            f"Invalid APP_ENV '{app_env}'. Expected one of: {valid_envs}."
+        )
+
     return app_env
 
 
@@ -24,8 +28,26 @@ def _load_env_file(app_env: str) -> None:
 
 
 def _normalize_database_url(database_url: Optional[str]) -> Optional[str]:
-    if database_url and database_url.startswith("postgres://"):
-        return database_url.replace("postgres://", "postgresql://", 1)
+    if not database_url:
+        return database_url
+
+    # Legacy PostgreSQL scheme used by some providers.
+    if database_url.startswith("postgres://"):
+        database_url = database_url.replace(
+            "postgres://",
+            "postgresql://",
+            1,
+        )
+
+    # Production currently ships psycopg2-binary, not psycopg v3.
+    # Normalize an explicit psycopg v3 SQLAlchemy URL to psycopg2.
+    if database_url.startswith("postgresql+psycopg://"):
+        database_url = database_url.replace(
+            "postgresql+psycopg://",
+            "postgresql+psycopg2://",
+            1,
+        )
+
     return database_url
 
 
@@ -36,16 +58,44 @@ _load_env_file(APP_ENV)
 @dataclass(frozen=True)
 class Settings:
     APP_ENV: str = APP_ENV
-    DATABASE_URL: Optional[str] = _normalize_database_url(os.getenv("DATABASE_URL"))
-    SECRET_KEY: str = os.getenv("SECRET_KEY", "YOUR_SECRET_KEY")
-    ALGORITHM: str = os.getenv("ALGORITHM", "HS256")
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
-    STORE_QR_PUBLIC_BASE_URL: Optional[str] = os.getenv("STORE_QR_PUBLIC_BASE_URL")
-    STORE_QR_SUBMISSION_TOKEN_MINUTES: int = int(
-        os.getenv("STORE_QR_SUBMISSION_TOKEN_MINUTES", "10")
+
+    DATABASE_URL: Optional[str] = _normalize_database_url(
+        os.getenv("DATABASE_URL")
     )
+
+    SECRET_KEY: str = os.getenv(
+        "SECRET_KEY",
+        "YOUR_SECRET_KEY",
+    )
+
+    ALGORITHM: str = os.getenv(
+        "ALGORITHM",
+        "HS256",
+    )
+
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(
+        os.getenv(
+            "ACCESS_TOKEN_EXPIRE_MINUTES",
+            "1440",
+        )
+    )
+
+    STORE_QR_PUBLIC_BASE_URL: Optional[str] = os.getenv(
+        "STORE_QR_PUBLIC_BASE_URL"
+    )
+
+    STORE_QR_SUBMISSION_TOKEN_MINUTES: int = int(
+        os.getenv(
+            "STORE_QR_SUBMISSION_TOKEN_MINUTES",
+            "10",
+        )
+    )
+
     STORE_QR_PHOTO_MAX_BYTES: int = int(
-        os.getenv("STORE_QR_PHOTO_MAX_BYTES", str(5 * 1024 * 1024))
+        os.getenv(
+            "STORE_QR_PHOTO_MAX_BYTES",
+            str(5 * 1024 * 1024),
+        )
     )
 
 
