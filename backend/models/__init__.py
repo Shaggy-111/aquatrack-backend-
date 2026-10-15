@@ -20,6 +20,8 @@ modules = [
     "store_qr_delivery_submission",
     "monthly_virtual_card",
     "blinkit_report_store_metadata",
+    "store_reimbursement",
+    "store_compliance_monthly",
 ]
 
 for module in modules:

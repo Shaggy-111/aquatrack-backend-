@@ -112,6 +112,11 @@ class Store(Base):
         back_populates="store",
     )
 
+    monthly_compliances = relationship(
+        "StoreMonthlyCompliance",
+        back_populates="store",
+    )
+
     # -------------------------------------------------
     # Virtual Properties (Partner / POC Resolution)
     # -------------------------------------------------

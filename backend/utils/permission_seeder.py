@@ -37,6 +37,7 @@ FINALIZED_PERMISSION_MATRIX: List[Dict[str, object]] = [
     {"module": "Active Stores", "actions": ["view", "create", "edit", "delete", "assign", "export", "deactivate", "reactivate", "view_store_health", "view_store_history"], "icon": "storefront"},
     {"module": "Store Analytics", "actions": ["view", "export", "drilldown", "compare_periods", "view_trends"], "icon": "analytics"},
     {"module": "Store Auto Order", "actions": ["view", "edit", "approve", "reject", "manage", "pause_auto_order", "resume_auto_order", "override_quantity"], "icon": "autorenew"},
+    {"module": "Store Reimbursement", "key": "store_reimbursement", "actions": ["view", "create", "edit", "approve", "record_payment", "upload_proof", "cancel", "export"], "icon": "receipt_long"},
     {"module": "Partner / POC", "actions": ["view", "create", "edit", "delete", "assign", "approve", "reject", "export", "activate", "deactivate", "assign_stores", "view_partner_performance"], "icon": "handshake"},
     {"module": "Customers", "actions": ["view", "create", "edit", "delete", "export", "activate", "deactivate", "merge_customer", "customer_history", "communication_log"], "icon": "groups"},
 
@@ -64,7 +65,7 @@ FINALIZED_PERMISSION_MATRIX: List[Dict[str, object]] = [
 
     # Compliance
     {"module": "Complaints", "actions": ["view", "create", "edit", "assign", "approve", "reject", "export", "resolve", "reopen", "escalate", "add_internal_note", "sla_override"], "icon": "support_agent"},
-    {"module": "Store Compliance", "actions": ["view", "create", "edit", "upload", "approve", "reject", "delete", "export", "generate_pdf", "compliance_review", "version_history", "document_archive"], "icon": "fact_check"},
+    {"module": "Store Compliance", "actions": ["view", "create", "edit", "upload", "invoice_manage", "record_payment", "approve", "reject", "delete", "export", "generate_pdf", "compliance_review", "version_history", "document_archive"], "icon": "fact_check"},
     {"module": "Vendor License", "actions": ["view", "create", "edit", "delete", "upload", "export", "verify_license", "expire_license", "renew_license", "location_lookup"], "icon": "verified"},
     {"module": "Regions", "actions": ["view", "create", "edit", "delete", "assign", "export", "territory_mapping", "region_hierarchy_manage"], "icon": "map"},
 
@@ -174,6 +175,7 @@ SIDEBAR_GROUP_BY_MODULE: Dict[str, str] = {
     "Active Stores": "Stores",
     "Store Analytics": "Stores",
     "Store Auto Order": "Stores",
+    "Store Reimbursement": "Stores",
     "Partner / POC": "Stores",
     "Customers": "Stores",
     "Store Manager": "Stores",

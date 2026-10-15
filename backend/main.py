@@ -25,6 +25,8 @@ from .routes import dashboard
 from .routes import store_qr_delivery
 from .routes import monthly_virtual_cards
 from .routes import blinkit_reports
+from .routes import store_reimbursement
+from .routes import store_compliance_monthly
 from .routes.delivery_manager import router as delivery_manager_router
 from backend.utils.auto_order_runner import run_auto_order
 from backend.utils.google_sheet_auto_sync import run_google_sheet_sync
@@ -136,6 +138,8 @@ app.include_router(permissions.router)
 app.include_router(store_qr_delivery.router)
 app.include_router(monthly_virtual_cards.router)
 app.include_router(blinkit_reports.router)
+app.include_router(store_reimbursement.router)
+app.include_router(store_compliance_monthly.router)
 
 
 
