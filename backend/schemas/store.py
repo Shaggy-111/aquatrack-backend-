@@ -99,6 +99,31 @@ class StoreStatusUpdate(BaseModel):
     is_active: bool
 
 
+class StoreSelectorItem(BaseModel):
+    id: str
+    store_name: str
+    region: Optional[str] = None
+    channel: str
+    entity: Optional[str] = None
+    state: Optional[str] = None
+    city: Optional[str] = None
+    is_active: bool
+
+
+class StoreSelectorResponse(BaseModel):
+    items: List[StoreSelectorItem]
+    page: int
+    page_size: int
+    has_more: bool
+
+
+class StoreSelectorFilters(BaseModel):
+    regions: List[str]
+    channels: List[str]
+    states: List[str]
+    cities: List[str]
+
+
 class StoreDeliverySummary(BaseModel):
     store_id: str
     store_name: str

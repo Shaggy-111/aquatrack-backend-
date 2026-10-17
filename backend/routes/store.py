@@ -1,10 +1,10 @@
 import os
-from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Form, Response
+from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile, Form, Response, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session, load_only, joinedload
 from typing import List, Optional
 from datetime import datetime, timedelta
-from sqlalchemy import func, extract
+from sqlalchemy import func, extract, or_
 
 from ..database.db import get_db
 from ..models.employee_store_mapping import EmployeeStoreMapping
@@ -20,12 +20,15 @@ from ..schemas.store import (
     StoreDeliverySummary,
     StoreBulkUploadSuccessResponse,
     StoreBulkUploadErrorResponse,
+    StoreSelectorResponse,
+    StoreSelectorFilters,
 )
 from ..utils.jwt import get_current_user
 from ..utils.auth import hash_password
 from ..utils.permissions import (
     filter_query_by_employee_stores,
     get_employee_store_ids,
+    get_employee_permissions,
     require_permission
 )
 from backend.utils.auto_order import validate_store_for_auto_order
@@ -132,6 +135,95 @@ def store_access_required(
 # The prefix is correct for the main router: /store
 router = APIRouter(prefix="/store", tags=["Store"])
 status_router = APIRouter(prefix="/stores", tags=["Store"])
+
+
+def _selector_scope(db: Session, current_user: User):
+    """Authorize reimbursement lookup without loading assigned Store IDs."""
+    if current_user.role == RoleEnum.superadmin:
+        return db.query(Store)
+    if current_user.role != RoleEnum.employee:
+        raise HTTPException(status_code=403, detail="Only Super Admin or an authorized employee can select stores.")
+    allowed = {"store_reimbursement.view", "store_reimbursement.create"}
+    if not allowed.intersection(get_employee_permissions(current_user.id, db=db)):
+        raise HTTPException(status_code=403, detail="Store Reimbursement permission required.")
+    return db.query(Store).filter(
+        db.query(EmployeeStoreMapping.id).filter(
+            EmployeeStoreMapping.employee_id == current_user.id,
+            EmployeeStoreMapping.store_id == Store.id,
+        ).exists()
+    )
+
+
+def _selector_filters(query, **filters):
+    for field, value in filters.items():
+        if isinstance(value, str) and value.strip():
+            query = query.filter(getattr(Store, field) == value.strip())
+    return query
+
+
+@status_router.get("/selector/filters", response_model=StoreSelectorFilters)
+def get_store_selector_filters(
+    region: Optional[str] = None,
+    channel: Optional[str] = None,
+    state: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # Each level uses only its upstream selections, never a paginated Store list.
+    base = _selector_scope(db, current_user)
+
+    def values(query, column):
+        return [row[0] for row in query.with_entities(column).filter(
+            column.isnot(None), func.trim(column) != ""
+        ).distinct().order_by(column).all()]
+
+    region_query = _selector_filters(base, region=region)
+    channel_query = _selector_filters(region_query, channel=channel)
+    state_query = _selector_filters(channel_query, state=state)
+    return {
+        "regions": values(base, Store.region),
+        "channels": values(region_query, Store.channel),
+        "states": values(channel_query, Store.state),
+        "cities": values(state_query, Store.city),
+    }
+
+
+@status_router.get("/selector", response_model=StoreSelectorResponse)
+def get_store_selector(
+    region: Optional[str] = None,
+    channel: Optional[str] = None,
+    state: Optional[str] = None,
+    city: Optional[str] = None,
+    search: Optional[str] = None,
+    is_active: Optional[bool] = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    query = _selector_filters(
+        _selector_scope(db, current_user),
+        region=region, channel=channel, state=state, city=city,
+    )
+    if search and search.strip():
+        escaped = search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        term = f"%{escaped}%"
+        query = query.filter(or_(
+            Store.store_name.ilike(term, escape="\\"),
+            Store.id.ilike(term, escape="\\"),
+        ))
+    if is_active is not None:
+        query = query.filter(Store.is_active.is_(is_active))
+    rows = query.with_entities(
+        Store.id, Store.store_name, Store.region, Store.channel, Store.entity,
+        Store.state, Store.city, Store.is_active,
+    ).order_by(Store.store_name, Store.id).offset((page - 1) * page_size).limit(page_size + 1).all()
+    return {
+        "items": [dict(row._mapping) for row in rows[:page_size]],
+        "page": page,
+        "page_size": page_size,
+        "has_more": len(rows) > page_size,
+    }
 
 
 # ✅ Create Store

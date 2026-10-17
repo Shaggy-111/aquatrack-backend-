@@ -13,10 +13,11 @@ from fastapi import (
     UploadFile,
     status,
 )
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, case, select
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from ..database.db import get_db
+from ..models.employee_store_mapping import EmployeeStoreMapping
 from ..models.store_reimbursement import (
     StoreReimbursement,
     StoreReimbursementAttachment,
@@ -58,7 +59,6 @@ from ..services.store_reimbursement import (
 )
 from ..utils.jwt import get_current_user
 from ..utils.permissions import (
-    filter_query_by_employee_stores,
     get_employee_store_ids,
     require_permission,
 )
@@ -78,9 +78,14 @@ def _check_access(permission_key: str, current_user: User, db: Session) -> None:
     )
 
 
-def _format_reimbursement_out(r: StoreReimbursement) -> StoreReimbursementOut:
-    payments_count = len(r.payments) if "payments" in r.__dict__ else 0
-    attachments_count = len([a for a in r.attachments if a.voided_at is None]) if "attachments" in r.__dict__ else 0
+def _format_reimbursement_out(
+    r: StoreReimbursement, payments_count: Optional[int] = None,
+    attachments_count: Optional[int] = None,
+) -> StoreReimbursementOut:
+    if payments_count is None:
+        payments_count = len(r.payments) if "payments" in r.__dict__ else 0
+    if attachments_count is None:
+        attachments_count = len([a for a in r.attachments if a.voided_at is None]) if "attachments" in r.__dict__ else 0
 
     return StoreReimbursementOut(
         id=r.id,
@@ -202,7 +207,10 @@ def _apply_filters(
 ) -> Query:
     # 1. Employee store scope
     if current_user.role == RoleEnum.employee:
-        query = filter_query_by_employee_stores(query, current_user)
+        query = query.filter(db.query(EmployeeStoreMapping.id).filter(
+            EmployeeStoreMapping.employee_id == current_user.id,
+            EmployeeStoreMapping.store_id == StoreReimbursement.store_id,
+        ).exists())
 
     # 2. Search
     if isinstance(search, str) and search.strip():
@@ -362,12 +370,19 @@ def list_reimbursements_endpoint(
     page_num = page if isinstance(page, int) and not isinstance(page, bool) and page >= 1 else 1
     page_limit = page_size if isinstance(page_size, int) and not isinstance(page_size, bool) and 1 <= page_size <= 100 else 20
 
+    payment_count = select(func.count(StoreReimbursementPayment.id)).where(
+        StoreReimbursementPayment.reimbursement_id == StoreReimbursement.id
+    ).correlate(StoreReimbursement).scalar_subquery()
+    attachment_count = select(func.count(StoreReimbursementAttachment.id)).where(
+        StoreReimbursementAttachment.reimbursement_id == StoreReimbursement.id,
+        StoreReimbursementAttachment.voided_at.is_(None),
+    ).correlate(StoreReimbursement).scalar_subquery()
     items = (
-        filtered_query.options(
+        filtered_query.add_columns(payment_count, attachment_count).options(
             joinedload(StoreReimbursement.created_by),
             joinedload(StoreReimbursement.approved_by),
-            selectinload(StoreReimbursement.payments),
-            selectinload(StoreReimbursement.attachments),
+            joinedload(StoreReimbursement.rejected_by),
+            joinedload(StoreReimbursement.cancelled_by),
         )
         .order_by(StoreReimbursement.created_at.desc(), StoreReimbursement.id.desc())
         .offset((page_num - 1) * page_limit)
@@ -378,7 +393,8 @@ def list_reimbursements_endpoint(
     total_pages = (total + page_limit - 1) // page_limit if total > 0 else 0
 
     return StoreReimbursementListResponse(
-        items=[_format_reimbursement_out(item) for item in items],
+        items=[_format_reimbursement_out(item, payments, attachments)
+               for item, payments, attachments in items],
         total=total,
         page=page_num,
         page_size=page_limit,
@@ -418,32 +434,28 @@ def get_reimbursement_summary_endpoint(
         entity=entity,
     )
 
-    rows = query.all()
-
-    total_claims = len(rows)
-    pending_count = sum(1 for r in rows if r.status == StoreReimbursementStatus.PENDING.value)
-    approved_count = sum(1 for r in rows if r.status == StoreReimbursementStatus.APPROVED.value)
-    partially_paid_count = sum(1 for r in rows if r.status == StoreReimbursementStatus.PARTIALLY_PAID.value)
-    paid_count = sum(1 for r in rows if r.status == StoreReimbursementStatus.PAID.value)
-    rejected_count = sum(1 for r in rows if r.status == StoreReimbursementStatus.REJECTED.value)
-    cancelled_count = sum(1 for r in rows if r.status == StoreReimbursementStatus.CANCELLED.value)
-
-    total_reimb = sum((r.total_amount for r in rows), Decimal("0.00")).quantize(Decimal("0.01"))
-    total_paid = sum((r.total_paid for r in rows), Decimal("0.00")).quantize(Decimal("0.01"))
-    total_outstanding = sum((r.outstanding_amount for r in rows), Decimal("0.00")).quantize(Decimal("0.01"))
-
-    return StoreReimbursementSummaryResponse(
-        total_claims=total_claims,
-        pending_count=pending_count,
-        approved_count=approved_count,
-        partially_paid_count=partially_paid_count,
-        paid_count=paid_count,
-        rejected_count=rejected_count,
-        cancelled_count=cancelled_count,
-        total_reimbursement_amount=total_reimb,
-        total_paid_amount=total_paid,
-        total_outstanding_amount=total_outstanding,
-    )
+    counts = [
+        func.count(case((StoreReimbursement.status == status.value, 1))).label(
+            status.value.lower() + "_count"
+        )
+        for status in StoreReimbursementStatus
+    ]
+    totals = [
+        func.coalesce(func.sum(getattr(StoreReimbursement, field)), Decimal("0.00"))
+        .label(label)
+        for field, label in (
+            ("total_amount", "total_reimbursement_amount"),
+            ("total_paid", "total_paid_amount"),
+            ("outstanding_amount", "total_outstanding_amount"),
+        )
+    ]
+    result = query.with_entities(
+        func.count(StoreReimbursement.id).label("total_claims"), *counts, *totals
+    ).one()
+    values = dict(result._mapping)
+    for field in ("total_reimbursement_amount", "total_paid_amount", "total_outstanding_amount"):
+        values[field] = values[field].quantize(Decimal("0.01"))
+    return StoreReimbursementSummaryResponse(**values)
 
 
 @router.get(
